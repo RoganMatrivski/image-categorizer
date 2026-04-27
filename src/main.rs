@@ -1,6 +1,6 @@
-use std::{sync::{Arc, LazyLock}};
+use std::sync::{Arc, LazyLock};
 
-use arrow_array::{RecordBatch, cast::AsArray};
+use arrow_array::{cast::AsArray, RecordBatch};
 use arrow_schema::{DataType, Schema};
 use color_eyre::Report;
 use eyre::ContextCompat;
@@ -13,12 +13,14 @@ use lancedb::{
 use open_clip_inference::VisionEmbedder;
 use petal_clustering::{Fit, HDbscan};
 
-mod init;
-mod embeddings;
-mod db;
 mod clustering;
+mod db;
+mod embeddings;
+mod init;
 
 use embeddings::OpenClipInference;
+
+use crate::embeddings::LlamaCppInference;
 
 #[cfg(target_env = "musl")]
 #[global_allocator]
@@ -57,8 +59,16 @@ async fn main() -> Result<(), Report> {
     let db = lancedb::connect(&args.db_path).execute().await?;
     tracing::info!("Connected to LanceDB");
 
-    let embedder = OpenClipInference { vis };
-    let dim = embedder.get_dim::<i32>().expect("Failed to get dimension") as usize;
+    let embedder = LlamaCppInference {
+        base_url: url::Url::parse("https://llama-cpp.rgmtrv.my.id")?,
+        client: reqwest::Client::new(),
+        dim: 2048,
+    };
+    let dim = embedder.dim;
+
+    // let embedder = OpenClipInference { vis };
+    // let dim = embedder.get_dim::<i32>().expect("Failed to get dimension") as usize;
+
     db.embedding_registry()
         .register("custom", Arc::new(embedder))?;
     tracing::debug!("Registered custom embedding function");
@@ -86,9 +96,7 @@ async fn main() -> Result<(), Report> {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let existing_query = table
-        .query()
-        .only_if(format!("filename IN ({namelist})"));
+    let existing_query = table.query().only_if(format!("filename IN ({namelist})"));
 
     let existing_batches: Vec<RecordBatch> = existing_query
         .execute()
@@ -131,38 +139,37 @@ async fn main() -> Result<(), Report> {
 
         let schema2 = Arc::clone(&schema);
         let stream = futures::stream::iter(not_exist)
-                .chunks(16)
-                .then(move |chunk| {
-                    let schema = schema2.clone();
-                    let pb = pb.clone();
-                    async move {
-                        let mut img_builder = arrow_array::builder::BinaryBuilder::new();
-                        let mut name_builder = arrow_array::builder::StringBuilder::new();
+            .chunks(16)
+            .then(move |chunk| {
+                let schema = schema2.clone();
+                let pb = pb.clone();
+                async move {
+                    let mut img_builder = arrow_array::builder::BinaryBuilder::new();
+                    let mut name_builder = arrow_array::builder::StringBuilder::new();
 
-                        for (path, name) in &chunk {
-                            let bytes = tokio::fs::read(path)
+                    for (path, name) in &chunk {
+                        let bytes =
+                            tokio::fs::read(path)
                                 .await
-                                .map_err(|e| {
-                                    lancedb::Error::Other {
-                                        message: e.to_string(),
-                                        source: Default::default(),
-                                    }
+                                .map_err(|e| lancedb::Error::Other {
+                                    message: e.to_string(),
+                                    source: Default::default(),
                                 })?;
-                            img_builder.append_value(&bytes);
-                            name_builder.append_value(name);
-                        }
-
-                        pb.inc(chunk.len() as u64);
-
-                        Ok::<_, lancedb::Error>(RecordBatch::try_new(
-                            schema.clone(),
-                            vec![
-                                Arc::new(img_builder.finish()),
-                                Arc::new(name_builder.finish()),
-                            ],
-                        )?)
+                        img_builder.append_value(&bytes);
+                        name_builder.append_value(name);
                     }
-                });
+
+                    pb.inc(chunk.len() as u64);
+
+                    Ok::<_, lancedb::Error>(RecordBatch::try_new(
+                        schema.clone(),
+                        vec![
+                            Arc::new(img_builder.finish()),
+                            Arc::new(name_builder.finish()),
+                        ],
+                    )?)
+                }
+            });
 
         let reader: SendableRecordBatchStream =
             Box::pin(SimpleRecordBatchStream::new(stream, schema.clone()));

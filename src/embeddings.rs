@@ -144,6 +144,7 @@ struct EmbedResult {
     pub embedding: Vec<Vec<f32>>,
 }
 
+#[derive(Debug)]
 pub struct LlamaCppInference {
     pub base_url: url::Url,
     pub client: reqwest::Client,
@@ -254,4 +255,63 @@ fn centroid(vectors: Vec<Vec<f32>>) -> Vec<f32> {
     let arr = ndarray::Array2::from_shape_vec((rows, cols), flat).unwrap();
 
     arr.mean_axis(ndarray::Axis(0)).unwrap().to_vec()
+}
+
+impl EmbeddingFunction for LlamaCppInference {
+    fn name(&self) -> &str {
+        "llamacpp"
+    }
+
+    fn source_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
+        Ok(Cow::Owned(DataType::Binary))
+    }
+
+    fn dest_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
+        Ok(Cow::Owned(DataType::new_fixed_size_list(
+            DataType::Float32,
+            self.dim as i32,
+            false,
+        )))
+    }
+
+    fn compute_source_embeddings(&self, source: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
+        tracing::debug!(n = source.len(), "Computing source embeddings");
+        let len = source.len();
+        let n_dims: i32 = self.dim as i32;
+        let inner = self
+            .compute_inner(source)
+            .map_err(|e| lancedb::Error::Other {
+                message: e.to_string(),
+                source: Some(e.into()),
+            })?;
+
+        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims, false);
+
+        let arraydata = ArrayData::builder(fsl)
+            .len(len)
+            .add_child_data(inner.into_data())
+            .build()?;
+
+        tracing::trace!(
+            len,
+            n_dims,
+            "Source embeddings built into FixedSizeListArray"
+        );
+
+        Ok(Arc::new(FixedSizeListArray::from(arraydata)))
+    }
+
+    fn compute_query_embeddings(&self, input: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
+        tracing::debug!(n = input.len(), "Computing query embeddings");
+        let arr = self
+            .compute_inner(input)
+            .map_err(|e| lancedb::Error::Other {
+                message: e.to_string(),
+                source: Some(e.into()),
+            })?;
+
+        tracing::trace!("Query embeddings ready");
+
+        Ok(Arc::new(arr))
+    }
 }
