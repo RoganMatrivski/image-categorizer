@@ -1,0 +1,39 @@
+[package]
+name = "image-categorizer"
+version = "0.1.0"
+authors = ["Robin Mauritz <robinmauritzrm@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "^0.1.48"
+
+
+[dependencies]
+arrow-array = "57"
+arrow-data = "57"
+arrow-schema = "57"
+clap = { version = "^4.5", features = ["derive"] }
+color-eyre = { version = "0.6.3", features = ["capture-spantrace"] }
+colored = "3.1.1"
+eyre = "0.6.12"
+futures = "0.3.32"
+image = "0.25.10"
+indicatif = "0.18.4"
+lancedb = "0.27.2"
+ndarray = "0.17.2"
+open_clip_inference = "0.4.0"
+ort = { version = "2.0.0-rc.12", features = ["directml", "webgpu"] }
+petal-clustering = "0.13.0"
+petal-neighbors = "0.18.0"
+tokio = { version = "1.52.1", features = ["rt", "macros"] }
+tracing = "0.1.41"
+tracing-error = "0.2.1"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+url = "2.5.8"
+
+[patch.crates-io]
+esaxx-rs = { path = "patches/esaxx-rs" }
+
+[profile.dev.package."*"]
+opt-level = 3

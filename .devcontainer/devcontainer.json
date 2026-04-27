@@ -1,0 +1,71 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/rust
+{
+	"name": "image-categorizer",
+	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	"image": "mcr.microsoft.com/devcontainers/rust:1-trixie",
+	// "build": {
+	// 	"dockerfile": "./Dockerfile",
+	// 	"context": "."
+	// },
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	"features": {
+		"ghcr.io/devcontainers/features/rust:1": {},
+		"ghcr.io/devcontainers-extra/features/fish-apt-get:1": {}
+		// "devwasm.azurecr.io/dev-wasm/dev-wasm-feature/rust-wasi:0": {}
+	},
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+	// Use 'postCreateCommand' to run commands after the container is created.
+	// "postStartCommand": "sudo chown $USER:$USER ${containerWorkspaceFolder}/target",
+	"postStartCommand": "chmod +x ./.devcontainer/onStart.sh; containerWorkspaceFolder=${containerWorkspaceFolder} ./.devcontainer/onStart.sh",
+	"mounts": [
+		{
+			"source": "${localWorkspaceFolderBasename}-volume",
+			"target": "/mnt/docker-mnt",
+			"type": "volume"
+		}
+	],
+	// Configure tool-specific properties.
+	// "customizations": {},
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	// "remoteUser": "root"
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"rust-lang.rust-analyzer",
+				"tamasfe.even-better-toml", // for Cargo.toml
+				"eamodio.gitlens", // IDE Git information
+				"davidanson.vscode-markdownlint",
+				"ms-azuretools.vscode-docker", // Docker integration and linting
+				"shardulm94.trailing-spaces", // Show trailing spaces
+				"Gruntfuggly.todo-tree", // Highlights TODO comments
+				"bierner.emojisense", // Emoji sense for markdown
+				"stkb.rewrap", // rewrap comments after n characters on one line
+				"vscode-icons-team.vscode-icons", // Better file extension icons
+				"github.vscode-pull-request-github", // Github interaction
+				"redhat.vscode-yaml", // Kubernetes, Drone syntax highlighting
+				"bajdzis.vscode-database", // Supports connections to mysql or postgres, over SSL, socked
+				"IBM.output-colorizer", // Colorize your output/test logs
+				"mohsen1.prettify-json", // Prettify JSON data
+				"zxh404.vscode-proto3", // Supports Proto syntax
+				"jrebocho.vscode-random", // Generates random values
+				"alefragnani.Bookmarks", // Manage bookmarks
+				"quicktype.quicktype", // Paste JSON as code
+				"swellaby.vscode-rust-test-adapter",
+				"spikespaz.vscode-smoothtype" // smooth cursor animation
+			],
+			"settings": {
+				"files.eol": "\n",
+				"[rust]": {
+					"editor.defaultFormatter": "rust-lang.rust-analyzer",
+					"editor.formatOnSave": true
+				},
+				"remote.extensionKind": {
+					"ms-azuretools.vscode-docker": "workspace"
+				},
+				"editor.codeActionsOnSaveTimeout": 3000
+			}
+		}
+	}
+}
