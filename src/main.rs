@@ -30,12 +30,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const MODEL: &str = "RuteNL/MobileCLIP2-S2-OpenCLIP-ONNX";
 
 #[derive(Debug)]
-struct CustomEmbedder {
+struct OpenClipInference {
     vis: VisionEmbedder,
-    dim: usize,
 }
 
-impl CustomEmbedder {
+impl OpenClipInference {
+    fn get_dim<T>(&self) -> Result<T, T::Error>
+    where
+        T: TryFrom<usize>,
+    {
+        T::try_from(self.vis.config.model_cfg.embed_dim)
+    }
+
     pub fn compute_inner(&self, source: Arc<dyn Array>) -> eyre::Result<Float32Array> {
         tracing::trace!(
             len = source.len(),
@@ -92,7 +98,7 @@ impl CustomEmbedder {
     }
 }
 
-impl EmbeddingFunction for CustomEmbedder {
+impl EmbeddingFunction for OpenClipInference {
     fn name(&self) -> &str {
         "custom"
     }
@@ -104,7 +110,7 @@ impl EmbeddingFunction for CustomEmbedder {
     fn dest_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
         Ok(Cow::Owned(DataType::new_fixed_size_list(
             DataType::Float32,
-            self.dim as i32,
+            self.get_dim().expect("Failed to get dimension"),
             false,
         )))
     }
@@ -112,7 +118,7 @@ impl EmbeddingFunction for CustomEmbedder {
     fn compute_source_embeddings(&self, source: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
         tracing::debug!(n = source.len(), "Computing source embeddings");
         let len = source.len();
-        let n_dims = self.dim;
+        let n_dims: i32 = self.get_dim().expect("Failed to get dimensions");
         let inner = self
             .compute_inner(source)
             .map_err(|e| lancedb::Error::Other {
@@ -120,7 +126,7 @@ impl EmbeddingFunction for CustomEmbedder {
                 source: Some(e.into()),
             })?;
 
-        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims as i32, false);
+        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims, false);
 
         let arraydata = ArrayData::builder(fsl)
             .len(len)
@@ -176,14 +182,14 @@ async fn main() -> Result<(), Report> {
             .await?
     };
 
-    let dim = vis.config.model_cfg.embed_dim;
-    tracing::info!(dim, "Vision embedder loaded");
+    tracing::info!("Vision embedder loaded");
 
     tracing::debug!(db_path = %args.db_path, "Connecting to LanceDB");
     let db = lancedb::connect(&args.db_path).execute().await?;
     tracing::info!("Connected to LanceDB");
 
-    let embedder = CustomEmbedder { vis, dim };
+    let embedder = OpenClipInference { vis };
+    let dim = embedder.get_dim().expect("Failed to get dimension");
     db.embedding_registry()
         .register("custom", Arc::new(embedder))?;
     tracing::debug!("Registered custom embedding function");
@@ -381,14 +387,6 @@ async fn main() -> Result<(), Report> {
     spin_pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} ({elapsed})").unwrap());
     spin_pb.set_message("Clustering");
     spin_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    // let mut hdbscan = HDbscan {
-    //     alpha: 1.0_f32,
-    //     min_samples: 5,
-    //     min_cluster_size: 5,
-    //     metric: Euclidean::default(),
-    //     boruvka: true,
-    // };
 
     // // This one's for Photos
     // let mut hdbscan = HDbscan {
