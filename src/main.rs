@@ -13,6 +13,7 @@ use lancedb::{
 use ndarray::{Array1, Array2};
 use open_clip_inference::VisionEmbedder;
 use petal_clustering::{Fit, HDbscan};
+use tokio_util::sync::CancellationToken;
 
 mod clustering;
 mod db;
@@ -43,6 +44,34 @@ static MPB: LazyLock<MultiProgress> = LazyLock::new(|| MultiProgress::new());
 #[tokio::main]
 async fn main() -> Result<(), Report> {
     let args = init::initialize()?;
+
+    let cancel_token = CancellationToken::new();
+    let cloned_token = cancel_token.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).unwrap();
+            let mut sigint = signal(SignalKind::interrupt()).unwrap();
+
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM, shutting down gracefully");
+                }
+                _ = sigint.recv() => {
+                    tracing::info!("Received SIGINT, shutting down gracefully");
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            tokio::signal::ctrl_c().await.unwrap();
+            tracing::info!("Received Ctrl+C, shutting down gracefully");
+        }
+
+        cloned_token.cancel();
+    });
 
     tracing::info!(model = MODEL, "Loading vision embedder");
     let vis = {
@@ -128,6 +157,15 @@ async fn main() -> Result<(), Report> {
     tracing::info!(n_new = not_exist.len(), "Images to index");
 
     if !not_exist.is_empty() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        {
+            let cancel_token = cancel_token.clone();
+            tokio::spawn(async move {
+                cancel_token.cancelled().await;
+                let _ = tx.send(());
+            });
+        }
+
         let pb = MPB.add(ProgressBar::new(not_exist.len() as u64));
         pb.set_style(
                 indicatif::ProgressStyle::with_template(
@@ -141,6 +179,9 @@ async fn main() -> Result<(), Report> {
         let schema2 = Arc::clone(&schema);
         let stream = futures::stream::iter(not_exist)
             .chunks(4)
+            .take_until(async move {
+                let _ = rx.await;
+            })
             .then(move |chunk| {
                 let schema = schema2.clone();
                 let pb = pb.clone();
@@ -176,8 +217,19 @@ async fn main() -> Result<(), Report> {
             Box::pin(SimpleRecordBatchStream::new(stream, schema.clone()));
 
         db::add_batches(&table, reader).await?;
+
+        if cancel_token.is_cancelled() {
+            tracing::info!(
+                "Graceful shutdown: index operation interrupted, saved partial progress"
+            );
+            return Ok(());
+        }
+
         tracing::info!("All images indexed successfully");
     } else {
+        if cancel_token.is_cancelled() {
+            return Ok(());
+        }
         tracing::warn!("No new images to index, all images already exist in table");
     }
 
@@ -188,7 +240,14 @@ async fn main() -> Result<(), Report> {
             .progress_chars("#>-"),
     );
 
-    let (filenames, data) = clustering::load_vectors(&table, dim, &load_pb).await?;
+    let (filenames, data) =
+        match clustering::load_vectors(&table, dim, &load_pb, Some(cancel_token.clone())).await {
+            Ok(res) => res,
+            Err(e) if cancel_token.is_cancelled() => {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
 
     let spin_pb = MPB.add(ProgressBar::new_spinner());
     spin_pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} ({elapsed})").unwrap());

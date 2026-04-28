@@ -6,22 +6,27 @@ use futures::TryStreamExt;
 use colored::Colorize;
 use std::collections::HashMap;
 
-pub async fn load_vectors(table: &Table, dim: usize, pb: &ProgressBar) -> eyre::Result<(Vec<String>, Array2<f32>)> {
-    let batches = table
-        .query()
-        .execute()
-        .await?
-        .try_collect::<Vec<RecordBatch>>()
-        .await?;
+pub async fn load_vectors(
+    table: &Table,
+    dim: usize,
+    pb: &ProgressBar,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
+) -> eyre::Result<(Vec<String>, Array2<f32>)> {
+    let mut query = table.query();
+    let mut stream = query.execute().await?;
 
-    pb.set_length(batches.len() as u64);
     pb.set_message("Loading vectors");
 
     let mut filenames: Vec<String> = Vec::new();
     let mut flat: Vec<f32> = Vec::new();
     let mut n_rows = 0usize;
 
-    for batch in &batches {
+    while let Some(batch) = stream.try_next().await? {
+        if let Some(ref token) = cancel_token {
+            if token.is_cancelled() {
+                return Err(eyre::eyre!("Loading interrupted by user"));
+            }
+        }
         filenames.extend(
             batch
                 .column_by_name("filename")
