@@ -172,10 +172,11 @@ async fn main() -> Result<(), Report> {
                 .progress_chars("#>-"),
             );
         pb.set_message("Processing images");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let schema2 = Arc::clone(&schema);
         let stream = futures::stream::iter(not_exist)
-            .chunks(4)
+            .chunks(2)
             .take_until(async move {
                 let _ = rx.await;
             })
@@ -213,16 +214,17 @@ async fn main() -> Result<(), Report> {
         let reader: SendableRecordBatchStream =
             Box::pin(SimpleRecordBatchStream::new(stream, schema.clone()));
 
-        db::add_batches(&table, reader).await?;
-
-        if cancel_token.is_cancelled() {
-            tracing::info!(
-                "Graceful shutdown: index operation interrupted, saved partial progress"
-            );
-            return Ok(());
+        if let Err(e) = db::add_batches(&table, reader).await {
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    "Graceful shutdown: indexing stopped, saved partial progress"
+                );
+                return Ok(());
+            }
+            tracing::error!(error = %e, "Indexing failed. Proceeding with already indexed data if any.");
+        } else {
+            tracing::info!("All images indexed successfully");
         }
-
-        tracing::info!("All images indexed successfully");
     } else {
         if cancel_token.is_cancelled() {
             return Ok(());
@@ -253,13 +255,22 @@ async fn main() -> Result<(), Report> {
 
     let spin_pb = MPB.add(ProgressBar::new_spinner());
     spin_pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} ({elapsed})").unwrap());
-    spin_pb.set_message("Dimensionality reduction (PCA)");
     spin_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    tracing::debug!(target_dim = 256, "Starting PCA dimensionality reduction");
-    let mut pca = petal_decomposition::PcaBuilder::new(256).build();
-    let embedding = pca.fit_transform(&data)?;
-    tracing::debug!("PCA reduction complete");
+    let embedding = if args.pca_dim > 0 {
+        spin_pb.set_message("Dimensionality reduction (PCA)");
+        tracing::debug!(
+            target_dim = args.pca_dim,
+            "Starting PCA dimensionality reduction"
+        );
+        let mut pca = petal_decomposition::PcaBuilder::new(args.pca_dim).build();
+        let emb = pca.fit_transform(&data)?;
+        tracing::debug!("PCA reduction complete");
+        emb
+    } else {
+        tracing::info!("Skipping PCA dimensionality reduction as requested");
+        data.clone()
+    };
 
     spin_pb.set_message("Clustering (HDBSCAN)");
     tracing::debug!("Starting HDBSCAN clustering");

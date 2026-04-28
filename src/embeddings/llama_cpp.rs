@@ -92,19 +92,29 @@ impl LlamaCppInference {
                         let client = client.clone();
                         let url = url.clone();
                         async move {
-                            let res: Vec<EmbedResult> = client
-                                .post(url)
-                                .json(&p)
-                                .send()
-                                .await
-                                .map_err(|e| eyre::eyre!("llama-server request failed: {e}"))?
-                                .error_for_status()
-                                .map_err(|e| eyre::eyre!("llama-server returned error: {e}"))?
-                                .json()
-                                .await
-                                .map_err(|e| {
-                                    eyre::eyre!("failed to parse llama-server response: {e}")
-                                })?;
+                            let mut attempts = 0;
+                            let max_attempts = 3;
+                            let res: Vec<EmbedResult> = loop {
+                                match client.post(url.clone()).json(&p).send().await {
+                                    Ok(resp) => {
+                                        match resp.error_for_status() {
+                                            Ok(resp) => break resp.json().await.map_err(|e| eyre::eyre!("failed to parse llama-server response: {e}")),
+                                            Err(e) if attempts < max_attempts => {
+                                                attempts += 1;
+                                                tracing::warn!(error = %e, attempt = attempts, "llama-server error, retrying...");
+                                                tokio::time::sleep(std::time::Duration::from_secs(attempts)).await;
+                                            }
+                                            Err(e) => break Err(eyre::eyre!("llama-server returned error: {e}")),
+                                        }
+                                    }
+                                    Err(e) if attempts < max_attempts => {
+                                        attempts += 1;
+                                        tracing::warn!(error = %e, attempt = attempts, "llama-server request failed, retrying...");
+                                        tokio::time::sleep(std::time::Duration::from_secs(attempts)).await;
+                                    }
+                                    Err(e) => break Err(eyre::eyre!("llama-server request failed: {e}")),
+                                }
+                            }?;
 
                             let embed_res =
                                 res.get(0).wrap_err("Failed to get embedding result")?;

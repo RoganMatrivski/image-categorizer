@@ -15,6 +15,10 @@ pub struct Args {
     #[arg(short = 'o', long, default_value = "./output")]
     pub db_path: String,
 
+    /// PCA target dimension. Set to 0 to skip PCA.
+    #[arg(short = 'p', long, default_value = "256")]
+    pub pca_dim: usize,
+
     pub images: ImagePaths,
 }
 
