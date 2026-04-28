@@ -10,7 +10,6 @@ use lancedb::{
     arrow::{SendableRecordBatchStream, SimpleRecordBatchStream},
     query::{ExecutableQuery, QueryBase},
 };
-use ndarray::{Array1, Array2};
 use open_clip_inference::VisionEmbedder;
 use petal_clustering::{Fit, HDbscan};
 use tokio_util::sync::CancellationToken;
@@ -19,8 +18,6 @@ mod clustering;
 mod db;
 mod embeddings;
 mod init;
-
-use embeddings::OpenClipInference;
 
 use crate::embeddings::LlamaCppInference;
 
@@ -249,14 +246,23 @@ async fn main() -> Result<(), Report> {
             Err(e) => return Err(e),
         };
 
+    tracing::info!(
+        n_vectors = filenames.len(),
+        "Vectors loaded successfully from database"
+    );
+
     let spin_pb = MPB.add(ProgressBar::new_spinner());
     spin_pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} ({elapsed})").unwrap());
-    spin_pb.set_message("Clustering");
+    spin_pb.set_message("Dimensionality reduction (PCA)");
     spin_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
+    tracing::debug!(target_dim = 256, "Starting PCA dimensionality reduction");
     let mut pca = petal_decomposition::PcaBuilder::new(256).build();
     let embedding = pca.fit_transform(&data)?;
+    tracing::debug!("PCA reduction complete");
 
+    spin_pb.set_message("Clustering (HDBSCAN)");
+    tracing::debug!("Starting HDBSCAN clustering");
     let mut hdbscan = HDbscan {
         min_samples: 3,
         min_cluster_size: 3,
