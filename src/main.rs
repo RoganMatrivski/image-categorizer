@@ -10,6 +10,7 @@ use lancedb::{
     arrow::{SendableRecordBatchStream, SimpleRecordBatchStream},
     query::{ExecutableQuery, QueryBase},
 };
+use ndarray::{Array1, Array2};
 use open_clip_inference::VisionEmbedder;
 use petal_clustering::{Fit, HDbscan};
 
@@ -139,7 +140,7 @@ async fn main() -> Result<(), Report> {
 
         let schema2 = Arc::clone(&schema);
         let stream = futures::stream::iter(not_exist)
-            .chunks(16)
+            .chunks(4)
             .then(move |chunk| {
                 let schema = schema2.clone();
                 let pb = pb.clone();
@@ -194,12 +195,15 @@ async fn main() -> Result<(), Report> {
     spin_pb.set_message("Clustering");
     spin_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
+    let mut pca = petal_decomposition::PcaBuilder::new(256).build();
+    let embedding = pca.fit_transform(&data)?;
+
     let mut hdbscan = HDbscan {
         min_samples: 3,
         min_cluster_size: 3,
         ..HDbscan::default()
     };
-    let (clusters, outliers, _scores) = hdbscan.fit(&data, None);
+    let (clusters, outliers, _scores) = hdbscan.fit(&embedding, None);
 
     spin_pb.finish_with_message(format!(
         "Clustering done — {} clusters, {} outliers",
