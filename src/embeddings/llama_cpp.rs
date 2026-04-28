@@ -1,0 +1,191 @@
+use std::{borrow::Cow, sync::Arc};
+use arrow_array::{builder::Float32Builder, cast::AsArray, Array, ArrayRef, Float32Array, FixedSizeListArray};
+use arrow_data::ArrayData;
+use arrow_schema::DataType;
+use eyre::{Context, ContextCompat};
+use lancedb::embeddings::EmbeddingFunction;
+use super::common::centroid;
+
+#[derive(serde::Deserialize)]
+struct EmbedResult {
+    pub _index: Option<usize>,
+    pub embedding: Vec<Vec<f32>>,
+}
+
+#[derive(Debug)]
+pub struct LlamaCppInference {
+    pub base_url: url::Url,
+    pub client: reqwest::Client,
+    pub dim: usize,
+}
+
+impl LlamaCppInference {
+    #[tracing::instrument(skip(self, source))]
+    fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
+        tracing::trace!(
+            len = source.len(),
+            nullable = source.is_nullable(),
+            "compute_inner called"
+        );
+
+        if source.is_nullable() {
+            eyre::bail!("Expected non-nullable data type")
+        }
+
+        if !matches!(source.data_type(), DataType::Binary) {
+            eyre::bail!("Expected Binary data type")
+        };
+
+        if source.len() == 0 {
+            tracing::debug!(
+                "Empty source array, returning empty embeddings (schema inference probe)"
+            );
+            return Ok(Float32Array::from(Vec::<f32>::new()));
+        }
+
+        tracing::debug!(n_images = source.len(), "Encoding images for embedding");
+
+        let inputs = source
+            .as_binary::<i32>()
+            .into_iter()
+            .map(|b| {
+                use base64::{engine::general_purpose, Engine as _};
+
+                let bytes = b.wrap_err("we already asserted that the array is non-nullable")?;
+                let b64 = general_purpose::STANDARD.encode(bytes);
+                eyre::Ok(b64)
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+
+        tracing::trace!(
+            n_images = inputs.len(),
+            "Images encoded as base64, preparing payloads"
+        );
+
+        let payloads = inputs
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "content": "Image: [img-1]",
+                    "image_data": [
+                        {
+                            "id": 1,
+                            "data": s,
+                        }
+                    ]
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let client = self.client.clone();
+        let url = self
+            .base_url
+            .join("/embedding")
+            .wrap_err("Failed to join base_url with '/embedding'")?;
+
+        tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async move {
+                use futures::StreamExt;
+
+                let mut stream = futures::stream::iter(payloads)
+                    .map(|p| {
+                        let client = client.clone();
+                        let url = url.clone();
+                        async move {
+                            let res: Vec<EmbedResult> = client
+                                .post(url)
+                                .json(&p)
+                                .send()
+                                .await
+                                .map_err(|e| eyre::eyre!("llama-server request failed: {e}"))?
+                                .error_for_status()
+                                .map_err(|e| eyre::eyre!("llama-server returned error: {e}"))?
+                                .json()
+                                .await
+                                .map_err(|e| {
+                                    eyre::eyre!("failed to parse llama-server response: {e}")
+                                })?;
+
+                            let embed_res =
+                                res.get(0).wrap_err("Failed to get embedding result")?;
+                            centroid(embed_res.embedding.clone())
+                        }
+                    })
+                    .buffer_unordered(4);
+
+                let mut vecres = vec![];
+                while let Some(res) = stream.next().await {
+                    vecres.push(res?);
+                }
+
+                let mut builder = Float32Builder::new();
+                for res in vecres {
+                    builder.append_slice(&res);
+                }
+
+                Ok(builder.finish())
+            })
+        })
+    }
+}
+
+impl EmbeddingFunction for LlamaCppInference {
+    fn name(&self) -> &str {
+        "llamacpp"
+    }
+
+    fn source_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
+        Ok(Cow::Owned(DataType::Binary))
+    }
+
+    fn dest_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
+        Ok(Cow::Owned(DataType::new_fixed_size_list(
+            DataType::Float32,
+            self.dim as i32,
+            false,
+        )))
+    }
+
+    #[tracing::instrument(skip(self, source))]
+    fn compute_source_embeddings(&self, source: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
+        tracing::debug!(n = source.len(), "Computing source embeddings");
+        let len = source.len();
+        let n_dims: i32 = self.dim as i32;
+        let inner = self
+            .compute_inner(source)
+            .map_err(|e| lancedb::Error::Other {
+                message: e.to_string(),
+                source: Some(e.into()),
+            })?;
+
+        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims, false);
+
+        let arraydata = ArrayData::builder(fsl)
+            .len(len)
+            .add_child_data(inner.into_data())
+            .build()?;
+
+        tracing::trace!(
+            len,
+            n_dims,
+            "Source embeddings built into FixedSizeListArray"
+        );
+
+        Ok(Arc::new(FixedSizeListArray::from(arraydata)))
+    }
+
+    #[tracing::instrument(skip(self, input))]
+    fn compute_query_embeddings(&self, input: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
+        tracing::debug!(n = input.len(), "Computing query embeddings");
+        let arr = self
+            .compute_inner(input)
+            .map_err(|e| lancedb::Error::Other {
+                message: e.to_string(),
+                source: Some(e.into()),
+            })?;
+
+        tracing::trace!("Query embeddings ready");
+
+        Ok(Arc::new(arr))
+    }
+}
