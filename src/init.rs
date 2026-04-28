@@ -19,6 +19,10 @@ pub struct Args {
     #[arg(short = 'p', long, default_value = "256")]
     pub pca_dim: usize,
 
+    /// Number of images to process in each batch.
+    #[arg(short = 'c', long, default_value = "8")]
+    pub chunk: usize,
+
     pub images: ImagePaths,
 }
 

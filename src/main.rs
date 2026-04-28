@@ -176,7 +176,7 @@ async fn main() -> Result<(), Report> {
 
         let schema2 = Arc::clone(&schema);
         let stream = futures::stream::iter(not_exist)
-            .chunks(2)
+            .chunks(args.chunk)
             .take_until(async move {
                 let _ = rx.await;
             })
