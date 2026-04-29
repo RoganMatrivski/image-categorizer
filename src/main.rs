@@ -125,12 +125,12 @@ async fn main() -> Result<(), Report> {
         cloned_token.cancel();
     });
 
-    tracing::debug!("Connecting to Turso database");
-    let (db, conn) = db::init_table(&args.get_db_str(), &table_name).await?;
-    tracing::info!(table = table_name, "Connected to Turso");
-
     let embedder = get_embedder(&args).await?;
     let dim = embedder.dim();
+
+    tracing::debug!("Connecting to Turso database");
+    let (db, conn) = db::init_table(&args.get_db_str(), dim as u32, &table_name).await?;
+    tracing::info!(table = table_name, "Connected to Turso");
 
     let images: Vec<_> = args.images.into_iter().filter(is_image).collect();
 

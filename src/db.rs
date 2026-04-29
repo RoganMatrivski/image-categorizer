@@ -2,6 +2,7 @@ use turso::{sync::Builder, sync::Database, Connection};
 
 pub async fn init_table(
     db_connstr: &str,
+    dims: u32,
     table_name: &str,
 ) -> eyre::Result<(Database, Connection)> {
     let db = Builder::new_remote(db_connstr)
@@ -15,16 +16,14 @@ pub async fn init_table(
     db.pull().await?;
 
     conn.execute(
-        &format!(
-            r#"
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            id INTEGER PRIMARY KEY,
-            filename TEXT UNIQUE,
-            embedding BLOB
-        );
-    "#
-        ),
-        turso::params![],
+        r#"
+            CREATE TABLE IF NOT EXISTS ?1 (
+                id INTEGER PRIMARY KEY,
+                filename TEXT UNIQUE,
+                embedding F32_BLOB()
+            );
+        "#,
+        turso::params![table_name, dims],
     )
     .await?;
 
