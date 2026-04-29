@@ -28,6 +28,14 @@ fn get_table_name(mode: init::EmbedMode, model: &str) -> String {
     format!("results_{}_{}", mode_str, model_sanitized)
 }
 
+fn get_filename(p: impl AsRef<std::path::Path> + std::fmt::Debug) -> eyre::Result<String> {
+    Ok(p.as_ref()
+        .file_name()
+        .wrap_err_with(|| format!("Invalid path: {p:?}"))?
+        .to_string_lossy()
+        .to_string())
+}
+
 static MPB: LazyLock<MultiProgress> = LazyLock::new(|| MultiProgress::new());
 
 async fn get_embedder(args: &init::Args) -> eyre::Result<Box<dyn Embedder + Send + Sync>> {
@@ -200,7 +208,9 @@ async fn main() -> Result<(), Report> {
                 let emb_bytes: Vec<u8> = emb.iter().flat_map(|f| f.to_ne_bytes()).collect();
 
                 conn.execute(
-                    &format!("INSERT OR IGNORE INTO {table_name} (filename, embedding) VALUES (?, ?)"),
+                    &format!(
+                        "INSERT OR IGNORE INTO {table_name} (filename, embedding) VALUES (?, ?)"
+                    ),
                     turso::params![name.clone(), emb_bytes],
                 )
                 .await?;
