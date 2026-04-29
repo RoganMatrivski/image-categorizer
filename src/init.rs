@@ -36,7 +36,24 @@ pub struct Args {
     )]
     pub base_url: Option<url::Url>,
 
+    #[arg(long)]
+    pub no_local_db: bool,
+
+    #[arg(long, default_value = "app.db")]
+    pub db: PathBuf,
+
     pub images: ImagePaths,
+}
+
+impl Args {
+    pub fn get_db_str(&self) -> String {
+        if self.no_local_db {
+            ":memory:"
+        } else {
+            self.db.to_str().expect("Failed to parse DB path")
+        }
+        .into()
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]

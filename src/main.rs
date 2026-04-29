@@ -126,7 +126,7 @@ async fn main() -> Result<(), Report> {
     });
 
     tracing::debug!("Connecting to Turso database");
-    let (db, conn) = db::init_table(&table_name).await?;
+    let (db, conn) = db::init_table(&args.get_db_str(), &table_name).await?;
     tracing::info!(table = table_name, "Connected to Turso");
 
     let embedder = get_embedder(&args).await?;
