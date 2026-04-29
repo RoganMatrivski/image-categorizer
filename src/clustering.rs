@@ -5,9 +5,15 @@ use turso::Connection;
 
 pub async fn load_vectors(
     conn: &Connection,
+    table_name: &str,
     dim: usize,
 ) -> eyre::Result<(Vec<String>, Array2<f32>)> {
-    let mut rows = conn.query("SELECT filename, embedding FROM results", turso::params![]).await?;
+    let mut rows = conn
+        .query(
+            &format!("SELECT filename, embedding FROM {}", table_name),
+            turso::params![],
+        )
+        .await?;
 
     let mut filenames: Vec<String> = Vec::new();
     let mut flat: Vec<f32> = Vec::new();
@@ -16,7 +22,7 @@ pub async fn load_vectors(
     while let Some(row) = rows.next().await? {
         let filename: String = row.get(0)?;
         let embedding_blob: Vec<u8> = row.get(1)?;
-        
+
         // Convert BLOB back to Vec<f32>
         let embedding: Vec<f32> = embedding_blob
             .chunks_exact(4)
@@ -24,7 +30,11 @@ pub async fn load_vectors(
             .collect();
 
         if embedding.len() != dim {
-            eyre::bail!("Embedding dimension mismatch: expected {}, got {}", dim, embedding.len());
+            eyre::bail!(
+                "Embedding dimension mismatch: expected {}, got {}",
+                dim,
+                embedding.len()
+            );
         }
 
         filenames.push(filename);

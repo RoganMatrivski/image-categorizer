@@ -1,6 +1,6 @@
 use std::{ops::Deref, path::PathBuf, str::FromStr};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use color_eyre::Report;
 
 mod progbar_logwriter;
@@ -20,7 +20,30 @@ pub struct Args {
     #[arg(short = 'c', long, default_value = "8")]
     pub chunk: usize,
 
+    /// Embedding mode
+    #[arg(long, value_enum, default_value_t = EmbedMode::OpenClip)]
+    pub embed_mode: EmbedMode,
+
+    /// HF model ID (OpenClip) or model name (Ollama)
+    #[arg(long, default_value = "RuteNL/MobileCLIP2-S2-OpenCLIP-ONNX")]
+    pub model: String,
+
+    /// Base URL for inference server
+    #[arg(
+        long,
+        required_if_eq("embed_mode", "llama-cpp"),
+        required_if_eq("embed_mode", "ollama")
+    )]
+    pub base_url: Option<url::Url>,
+
     pub images: ImagePaths,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+pub enum EmbedMode {
+    OpenClip,
+    LlamaCpp,
+    Ollama,
 }
 
 #[derive(Clone)]
@@ -74,6 +97,8 @@ macro_rules! pkg_name {
     };
 }
 pub fn initialize() -> Result<Args, Report> {
+    dotenvy::dotenv()?;
+
     use tracing_error::ErrorLayer;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter};
