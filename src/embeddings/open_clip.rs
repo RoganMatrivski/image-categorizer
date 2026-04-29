@@ -97,7 +97,7 @@ impl Embedder for OpenClipInference {
                 Ok(img)
             })
             .collect::<eyre::Result<Vec<_>>>()?;
-        pb.finish_with_message("decoding done");
+        pb.finish_and_clear();
 
         tracing::debug!(
             n_images = inputs.len(),
