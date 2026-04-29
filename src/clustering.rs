@@ -1,56 +1,36 @@
-use arrow_array::{cast::AsArray, FixedSizeListArray, Float32Array, RecordBatch};
-use lancedb::{table::Table, query::ExecutableQuery};
 use ndarray::Array2;
-use indicatif::ProgressBar;
-use futures::TryStreamExt;
 use colored::Colorize;
 use std::collections::HashMap;
+use turso::Connection;
 
 pub async fn load_vectors(
-    table: &Table,
+    conn: &Connection,
     dim: usize,
-    pb: &ProgressBar,
-    cancel_token: Option<tokio_util::sync::CancellationToken>,
 ) -> eyre::Result<(Vec<String>, Array2<f32>)> {
-    let mut query = table.query();
-    let mut stream = query.execute().await?;
-
-    pb.set_message("Loading vectors");
+    let mut rows = conn.query("SELECT filename, embedding FROM results", turso::params![]).await?;
 
     let mut filenames: Vec<String> = Vec::new();
     let mut flat: Vec<f32> = Vec::new();
     let mut n_rows = 0usize;
 
-    while let Some(batch) = stream.try_next().await? {
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                return Err(eyre::eyre!("Loading interrupted by user"));
-            }
+    while let Some(row) = rows.next().await? {
+        let filename: String = row.get(0)?;
+        let embedding_blob: Vec<u8> = row.get(1)?;
+        
+        // Convert BLOB back to Vec<f32>
+        let embedding: Vec<f32> = embedding_blob
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap()))
+            .collect();
+
+        if embedding.len() != dim {
+            eyre::bail!("Embedding dimension mismatch: expected {}, got {}", dim, embedding.len());
         }
-        filenames.extend(
-            batch
-                .column_by_name("filename")
-                .unwrap()
-                .as_string::<i32>()
-                .iter()
-                .flatten()
-                .map(|s| s.to_string()),
-        );
-        let vecs = batch
-            .column_by_name("vector")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .unwrap()
-            .values()
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .unwrap();
-        flat.extend_from_slice(vecs.values());
-        n_rows += batch.num_rows();
-        pb.inc(1);
+
+        filenames.push(filename);
+        flat.extend(embedding);
+        n_rows += 1;
     }
-    pb.finish_with_message("Vectors loaded");
 
     let data = Array2::from_shape_vec((n_rows, dim), flat)?;
     Ok((filenames, data))

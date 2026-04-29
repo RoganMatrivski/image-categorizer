@@ -1,9 +1,6 @@
-use std::{borrow::Cow, sync::Arc};
-use arrow_array::{builder::Float32Builder, cast::AsArray, Array, ArrayRef, Float32Array, FixedSizeListArray};
-use arrow_data::ArrayData;
+use arrow_array::{builder::Float32Builder, cast::AsArray, ArrayRef, Float32Array};
 use arrow_schema::DataType;
 use eyre::{Context, ContextCompat};
-use lancedb::embeddings::EmbeddingFunction;
 use super::common::centroid;
 
 #[derive(Debug)]
@@ -21,7 +18,7 @@ struct OllamaEmbedResponse {
 
 impl OllamaInference {
     #[tracing::instrument(skip(self, source))]
-    fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
+    pub fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
         if source.is_nullable() {
             eyre::bail!("Expected non-nullable data type")
         }
@@ -59,8 +56,6 @@ impl OllamaInference {
                         let model = self.model.clone();
                         async move {
                             // Ollama supports multimodal embeddings if the model supports it.
-                            // Note: Ollama's /api/embed might not directly support image input in all versions.
-                            // Some versions might need /api/generate with a specific prompt.
                             let payload = serde_json::json!({
                                 "model": model,
                                 "input": "describe this image",
@@ -96,54 +91,5 @@ impl OllamaInference {
                 Ok(builder.finish())
             })
         })
-    }
-}
-
-impl EmbeddingFunction for OllamaInference {
-    fn name(&self) -> &str {
-        "ollama"
-    }
-
-    fn source_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
-        Ok(Cow::Owned(DataType::Binary))
-    }
-
-    fn dest_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
-        Ok(Cow::Owned(DataType::new_fixed_size_list(
-            DataType::Float32,
-            self.dim as i32,
-            false,
-        )))
-    }
-
-    #[tracing::instrument(skip(self, source))]
-    fn compute_source_embeddings(&self, source: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
-        let len = source.len();
-        let n_dims: i32 = self.dim as i32;
-        let inner = self
-            .compute_inner(source)
-            .map_err(|e| lancedb::Error::Other {
-                message: e.to_string(),
-                source: Some(e.into()),
-            })?;
-
-        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims, false);
-        let arraydata = ArrayData::builder(fsl)
-            .len(len)
-            .add_child_data(inner.into_data())
-            .build()?;
-
-        Ok(Arc::new(FixedSizeListArray::from(arraydata)))
-    }
-
-    #[tracing::instrument(skip(self, input))]
-    fn compute_query_embeddings(&self, input: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
-        let arr = self
-            .compute_inner(input)
-            .map_err(|e| lancedb::Error::Other {
-                message: e.to_string(),
-                source: Some(e.into()),
-            })?;
-        Ok(Arc::new(arr))
     }
 }

@@ -1,9 +1,6 @@
-use std::{borrow::Cow, sync::Arc};
-use arrow_array::{builder::Float32Builder, cast::AsArray, Array, ArrayRef, Float32Array, FixedSizeListArray};
-use arrow_data::ArrayData;
+use arrow_array::{builder::Float32Builder, cast::AsArray, ArrayRef, Float32Array};
 use arrow_schema::DataType;
 use eyre::{Context, ContextCompat};
-use lancedb::embeddings::EmbeddingFunction;
 use super::common::centroid;
 
 #[derive(serde::Deserialize)]
@@ -21,7 +18,7 @@ pub struct LlamaCppInference {
 
 impl LlamaCppInference {
     #[tracing::instrument(skip(self, source))]
-    fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
+    pub fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
         tracing::trace!(
             len = source.len(),
             nullable = source.is_nullable(),
@@ -136,66 +133,5 @@ impl LlamaCppInference {
                 Ok(builder.finish())
             })
         })
-    }
-}
-
-impl EmbeddingFunction for LlamaCppInference {
-    fn name(&self) -> &str {
-        "llamacpp"
-    }
-
-    fn source_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
-        Ok(Cow::Owned(DataType::Binary))
-    }
-
-    fn dest_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
-        Ok(Cow::Owned(DataType::new_fixed_size_list(
-            DataType::Float32,
-            self.dim as i32,
-            false,
-        )))
-    }
-
-    #[tracing::instrument(skip(self, source))]
-    fn compute_source_embeddings(&self, source: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
-        tracing::debug!(n = source.len(), "Computing source embeddings");
-        let len = source.len();
-        let n_dims: i32 = self.dim as i32;
-        let inner = self
-            .compute_inner(source)
-            .map_err(|e| lancedb::Error::Other {
-                message: e.to_string(),
-                source: Some(e.into()),
-            })?;
-
-        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims, false);
-
-        let arraydata = ArrayData::builder(fsl)
-            .len(len)
-            .add_child_data(inner.into_data())
-            .build()?;
-
-        tracing::trace!(
-            len,
-            n_dims,
-            "Source embeddings built into FixedSizeListArray"
-        );
-
-        Ok(Arc::new(FixedSizeListArray::from(arraydata)))
-    }
-
-    #[tracing::instrument(skip(self, input))]
-    fn compute_query_embeddings(&self, input: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
-        tracing::debug!(n = input.len(), "Computing query embeddings");
-        let arr = self
-            .compute_inner(input)
-            .map_err(|e| lancedb::Error::Other {
-                message: e.to_string(),
-                source: Some(e.into()),
-            })?;
-
-        tracing::trace!("Query embeddings ready");
-
-        Ok(Arc::new(arr))
     }
 }

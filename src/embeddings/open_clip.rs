@@ -1,10 +1,8 @@
-use std::{borrow::Cow, sync::Arc};
-use arrow_array::{cast::AsArray, Array, Float32Array, FixedSizeListArray};
-use arrow_data::ArrayData;
+use std::sync::Arc;
+use arrow_array::{cast::AsArray, Array, Float32Array};
 use arrow_schema::DataType;
 use color_eyre::Report;
-use eyre::{Context, ContextCompat};
-use lancedb::embeddings::EmbeddingFunction;
+use eyre::ContextCompat;
 use open_clip_inference::VisionEmbedder;
 
 #[derive(Debug)]
@@ -74,66 +72,5 @@ impl OpenClipInference {
         );
 
         Ok(Float32Array::from(flat.to_vec()))
-    }
-}
-
-impl EmbeddingFunction for OpenClipInference {
-    fn name(&self) -> &str {
-        "custom"
-    }
-
-    fn source_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
-        Ok(Cow::Owned(DataType::Binary))
-    }
-
-    fn dest_type(&self) -> lancedb::Result<std::borrow::Cow<'_, DataType>> {
-        Ok(Cow::Owned(DataType::new_fixed_size_list(
-            DataType::Float32,
-            self.get_dim().expect("Failed to get dimension"),
-            false,
-        )))
-    }
-
-    #[tracing::instrument(skip(self, source))]
-    fn compute_source_embeddings(&self, source: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
-        tracing::debug!(n = source.len(), "Computing source embeddings");
-        let len = source.len();
-        let n_dims: i32 = self.get_dim().expect("Failed to get dimensions");
-        let inner = self
-            .compute_inner(source)
-            .map_err(|e| lancedb::Error::Other {
-                message: e.to_string(),
-                source: Some(e.into()),
-            })?;
-
-        let fsl = DataType::new_fixed_size_list(DataType::Float32, n_dims, false);
-
-        let arraydata = ArrayData::builder(fsl)
-            .len(len)
-            .add_child_data(inner.into_data())
-            .build()?;
-
-        tracing::trace!(
-            len,
-            n_dims,
-            "Source embeddings built into FixedSizeListArray"
-        );
-
-        Ok(Arc::new(FixedSizeListArray::from(arraydata)))
-    }
-
-    #[tracing::instrument(skip(self, input))]
-    fn compute_query_embeddings(&self, input: Arc<dyn Array>) -> lancedb::Result<Arc<dyn Array>> {
-        tracing::debug!(n = input.len(), "Computing query embeddings");
-        let arr = self
-            .compute_inner(input)
-            .map_err(|e| lancedb::Error::Other {
-                message: e.to_string(),
-                source: Some(e.into()),
-            })?;
-
-        tracing::trace!("Query embeddings ready");
-
-        Ok(Arc::new(arr))
     }
 }

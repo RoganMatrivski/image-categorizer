@@ -1,40 +1,27 @@
-use std::sync::Arc;
-use arrow_schema::{DataType, Field, Schema};
-use lancedb::{
-    arrow::SendableRecordBatchStream,
-    table::Table,
-    Connection,
-    embeddings::EmbeddingDefinition,
-};
+use turso::{sync::Database, Connection, sync::Builder};
 
-pub async fn get_or_create_table(
-    db: &Connection,
-    table_name: &str,
-    embedding_col: &str,
-    function_name: &str,
-) -> eyre::Result<Table> {
-    match db.open_table(table_name).execute().await {
-        Ok(t) => {
-            tracing::info!(table = table_name, "Opened existing table");
-            Ok(t)
-        }
-        Err(_) => {
-            tracing::info!(table = table_name, "Table not found, creating it");
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("img", DataType::Binary, false),
-                Field::new("filename", DataType::Utf8, false),
-            ]));
-            
-            db.create_empty_table(table_name, schema)
-                .add_embedding(EmbeddingDefinition::new("img", function_name, Some(embedding_col)))?
-                .execute()
-                .await
-                .map_err(Into::into)
-        }
-    }
-}
+pub async fn init_table() -> eyre::Result<(Database, Connection)> {
+    let db = Builder::new_remote("app.db")
+        .with_remote_url(&std::env::var("TURSO_DATABASE_URL")?)
+        .with_auth_token(&std::env::var("TURSO_AUTH_TOKEN")?)
+        .build()
+        .await?;
 
-pub async fn add_batches(table: &Table, reader: SendableRecordBatchStream) -> eyre::Result<()> {
-    table.add(reader).execute().await?;
-    Ok(())
+    let conn = db.connect().await?;
+
+    db.pull().await?;
+
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS results (
+            id INTEGER PRIMARY KEY,
+            filename TEXT UNIQUE,
+            embedding BLOB
+        );
+    "#,
+        turso::params![],
+    )
+    .await?;
+
+    Ok((db, conn))
 }

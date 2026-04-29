@@ -17,11 +17,11 @@ base64 = "0.22.1"
 clap = { version = "^4.5", features = ["derive"] }
 color-eyre = { version = "0.6.3", features = ["capture-spantrace"] }
 colored = "3.1.1"
+dotenvy = "0.15.7"
 eyre = "0.6.12"
 futures = "0.3.32"
 image = "0.25.10"
 indicatif = "0.18.4"
-lancedb = "0.27.2"
 ndarray = "0.17.2"
 open_clip_inference = "0.4.0"
 ort = { version = "2.0.0-rc.12", features = ["directml", "webgpu"] }
@@ -36,6 +36,7 @@ tokio-util = { version = "0.7.13" }
 tracing = "0.1.41"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+turso = { version = "0.5.3", features = ["sync"] }
 url = "2.5.8"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-seq"] }
 

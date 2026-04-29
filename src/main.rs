@@ -1,15 +1,8 @@
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
-use arrow_array::{cast::AsArray, RecordBatch};
-use arrow_schema::{DataType, Schema};
 use color_eyre::Report;
 use eyre::ContextCompat;
-use futures::{StreamExt, TryStreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use lancedb::{
-    arrow::{SendableRecordBatchStream, SimpleRecordBatchStream},
-    query::{ExecutableQuery, QueryBase},
-};
 use open_clip_inference::VisionEmbedder;
 use petal_clustering::{Fit, HDbscan};
 use tokio_util::sync::CancellationToken;
@@ -71,7 +64,7 @@ async fn main() -> Result<(), Report> {
     });
 
     tracing::info!(model = MODEL, "Loading vision embedder");
-    let vis = {
+    let _vis = {
         use ort::ep::{DirectML, WebGPU};
 
         VisionEmbedder::from_hf(MODEL)
@@ -82,9 +75,9 @@ async fn main() -> Result<(), Report> {
 
     tracing::info!("Vision embedder loaded");
 
-    tracing::debug!(db_path = %args.db_path, "Connecting to LanceDB");
-    let db = lancedb::connect(&args.db_path).execute().await?;
-    tracing::info!("Connected to LanceDB");
+    tracing::debug!("Connecting to Turso database");
+    let (db, conn) = db::init_table().await?;
+    tracing::info!("Connected to Turso");
 
     let embedder = LlamaCppInference {
         base_url: url::Url::parse("https://llama-cpp.rgmtrv.my.id")?,
@@ -92,19 +85,6 @@ async fn main() -> Result<(), Report> {
         dim: 2048,
     };
     let dim = embedder.dim;
-
-    // let embedder = OpenClipInference { vis };
-    // let dim = embedder.get_dim::<i32>().expect("Failed to get dimension") as usize;
-
-    db.embedding_registry()
-        .register("custom", Arc::new(embedder))?;
-    tracing::debug!("Registered custom embedding function");
-
-    let table = db::get_or_create_table(&db, "result", "vector", "custom").await?;
-    let schema = Arc::new(Schema::new(vec![
-        arrow_schema::Field::new("img", DataType::Binary, false),
-        arrow_schema::Field::new("filename", DataType::Utf8, false),
-    ]));
 
     tracing::debug!(
         n_images = args.images.len(),
@@ -123,26 +103,11 @@ async fn main() -> Result<(), Report> {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let existing_query = table.query().only_if(format!("filename IN ({namelist})"));
-
-    let existing_batches: Vec<RecordBatch> = existing_query
-        .execute()
-        .await?
-        .try_collect::<Vec<RecordBatch>>()
-        .await?;
-
-    let existing: Vec<String> = existing_batches
-        .iter()
-        .flat_map(|batch| {
-            batch
-                .column_by_name("filename")
-                .expect("Can't find filename column")
-                .as_string::<i32>()
-                .iter()
-                .flatten()
-                .map(|s: &str| s.to_string())
-        })
-        .collect::<Vec<_>>();
+    let mut existing_rows = conn.query(&format!("SELECT filename FROM results WHERE filename IN ({namelist})"), turso::params![]).await?;
+    let mut existing = Vec::new();
+    while let Some(row) = existing_rows.next().await? {
+        existing.push(row.get::<String>(0)?);
+    }
 
     tracing::info!(n_existing = existing.len(), "Found already-indexed images");
 
@@ -154,93 +119,82 @@ async fn main() -> Result<(), Report> {
     tracing::info!(n_new = not_exist.len(), "Images to index");
 
     if !not_exist.is_empty() {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        {
-            let cancel_token = cancel_token.clone();
-            tokio::spawn(async move {
-                cancel_token.cancelled().await;
-                let _ = tx.send(());
-            });
-        }
-
         let pb = MPB.add(ProgressBar::new(not_exist.len() as u64));
         pb.set_style(
-                indicatif::ProgressStyle::with_template(
-                    "{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-                )
-                .unwrap()
-                .progress_chars("#>-"),
-            );
+            indicatif::ProgressStyle::with_template(
+                "{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
         pb.set_message("Processing images");
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        let schema2 = Arc::clone(&schema);
-        let stream = futures::stream::iter(not_exist)
-            .chunks(args.chunk)
-            .take_until(async move {
-                let _ = rx.await;
-            })
-            .then(move |chunk| {
-                let schema = schema2.clone();
-                let pb = pb.clone();
-                async move {
-                    let mut img_builder = arrow_array::builder::BinaryBuilder::new();
-                    let mut name_builder = arrow_array::builder::StringBuilder::new();
-
-                    for (path, name) in &chunk {
-                        let bytes =
-                            tokio::fs::read(path)
-                                .await
-                                .map_err(|e| lancedb::Error::Other {
-                                    message: e.to_string(),
-                                    source: Default::default(),
-                                })?;
-                        img_builder.append_value(&bytes);
-                        name_builder.append_value(name);
-                    }
-
-                    pb.inc(chunk.len() as u64);
-
-                    Ok::<_, lancedb::Error>(RecordBatch::try_new(
-                        schema.clone(),
-                        vec![
-                            Arc::new(img_builder.finish()),
-                            Arc::new(name_builder.finish()),
-                        ],
-                    )?)
-                }
-            });
-
-        let reader: SendableRecordBatchStream =
-            Box::pin(SimpleRecordBatchStream::new(stream, schema.clone()));
-
-        if let Err(e) = db::add_batches(&table, reader).await {
+        let mut indexed_any = false;
+        for chunk in not_exist.chunks(args.chunk) {
             if cancel_token.is_cancelled() {
-                tracing::info!(
-                    "Graceful shutdown: indexing stopped, saved partial progress"
-                );
-                return Ok(());
+                break;
             }
-            tracing::error!(error = %e, "Indexing failed. Proceeding with already indexed data if any.");
-        } else {
-            tracing::info!("All images indexed successfully");
+
+            let mut img_data = Vec::new();
+            for (path, name) in chunk {
+                let bytes = tokio::fs::read(path).await?;
+                img_data.push((name.clone(), bytes));
+            }
+
+            use arrow_array::{ArrayRef, BinaryArray};
+            let arr: ArrayRef = std::sync::Arc::new(BinaryArray::from(
+                img_data.iter().map(|(_, b)| b.as_slice()).collect::<Vec<_>>(),
+            ));
+
+            let embeddings = embedder.compute_inner(arr)?;
+            
+            for (i, (_, name)) in chunk.iter().enumerate() {
+                let start = i * dim;
+                let end = (i + 1) * dim;
+                let emb = &embeddings.values()[start..end];
+                let emb_bytes: Vec<u8> = emb
+                    .iter()
+                    .flat_map(|f| f.to_ne_bytes())
+                    .collect();
+
+                conn.execute(
+                    "INSERT OR IGNORE INTO results (filename, embedding) VALUES (?, ?)",
+                    turso::params![name.clone(), emb_bytes],
+                )
+                .await?;
+            }
+
+            pb.inc(chunk.len() as u64);
+            indexed_any = true;
         }
+
+        if indexed_any {
+            tracing::info!("Pushing changes to Turso...");
+            db.push().await?;
+        }
+
+        if cancel_token.is_cancelled() {
+            tracing::info!("Graceful shutdown: indexing stopped, saved partial progress");
+            return Ok(());
+        }
+        tracing::info!("All images indexed successfully");
     } else {
         if cancel_token.is_cancelled() {
             return Ok(());
         }
-        tracing::warn!("No new images to index, all images already exist in table");
+        tracing::warn!("No new images to index, all images already exist in database");
     }
 
     let load_pb = MPB.add(ProgressBar::new(0));
     load_pb.set_style(
-        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} batches ({elapsed})")
+        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} ({elapsed})")
             .unwrap()
             .progress_chars("#>-"),
     );
 
     let (filenames, data) =
-        match clustering::load_vectors(&table, dim, &load_pb, Some(cancel_token.clone())).await {
+        match clustering::load_vectors(&conn, dim).await {
             Ok(res) => res,
             Err(e) if cancel_token.is_cancelled() => {
                 return Ok(());
@@ -288,6 +242,9 @@ async fn main() -> Result<(), Report> {
     ));
 
     clustering::print_clusters(&filenames, &data, &clusters, &outliers);
+
+    tracing::info!("Final sync with Turso...");
+    db.push().await?;
 
     Ok(())
 }
