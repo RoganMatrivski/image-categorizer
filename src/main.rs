@@ -283,7 +283,8 @@ async fn main() -> Result<(), Report> {
         min_cluster_size: 3,
         ..HDbscan::default()
     };
-    let (clusters, outliers, _scores) = hdbscan.fit(&embedding, None);
+    let (clusters, outliers, outlier_scores) = hdbscan.fit(&embedding, None);
+    let noise_ratio = outliers.len() as f32 / embedding.nrows() as f32;
 
     spin_pb.finish_with_message(format!(
         "Clustering done — {} clusters, {} outliers",
