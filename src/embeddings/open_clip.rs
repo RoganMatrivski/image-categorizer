@@ -1,29 +1,26 @@
-use std::sync::Arc;
-use arrow_array::{cast::AsArray, Array, Float32Array};
+use arrow_array::{cast::AsArray, ArrayRef, Float32Array};
 use arrow_schema::DataType;
 use color_eyre::Report;
 use eyre::ContextCompat;
 use open_clip_inference::VisionEmbedder;
+use super::common::Embedder;
 
 #[derive(Debug)]
 pub struct OpenClipInference {
     pub vis: VisionEmbedder,
 }
 
-impl OpenClipInference {
-    pub fn get_dim<T>(&self) -> Result<T, T::Error>
-    where
-        T: TryFrom<usize>,
-    {
-        T::try_from(self.vis.config.model_cfg.embed_dim)
+impl Embedder for OpenClipInference {
+    fn dim(&self) -> usize {
+        self.vis.config.model_cfg.embed_dim as usize
     }
 
     #[tracing::instrument(skip(self, source))]
-    pub fn compute_inner(&self, source: Arc<dyn Array>) -> eyre::Result<Float32Array> {
+    fn embed_array(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
         tracing::trace!(
             len = source.len(),
             nullable = source.is_nullable(),
-            "compute_inner called"
+            "embed_array called"
         );
 
         if source.is_nullable() {

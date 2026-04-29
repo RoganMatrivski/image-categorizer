@@ -1,7 +1,7 @@
 use arrow_array::{builder::Float32Builder, cast::AsArray, ArrayRef, Float32Array};
 use arrow_schema::DataType;
 use eyre::{Context, ContextCompat};
-use super::common::centroid;
+use super::common::{centroid, Embedder};
 
 #[derive(serde::Deserialize)]
 struct EmbedResult {
@@ -16,13 +16,17 @@ pub struct LlamaCppInference {
     pub dim: usize,
 }
 
-impl LlamaCppInference {
+impl Embedder for LlamaCppInference {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
     #[tracing::instrument(skip(self, source))]
-    pub fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
+    fn embed_array(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
         tracing::trace!(
             len = source.len(),
             nullable = source.is_nullable(),
-            "compute_inner called"
+            "embed_array called"
         );
 
         if source.is_nullable() {

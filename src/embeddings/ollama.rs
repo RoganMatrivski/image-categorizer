@@ -1,7 +1,7 @@
 use arrow_array::{builder::Float32Builder, cast::AsArray, ArrayRef, Float32Array};
 use arrow_schema::DataType;
 use eyre::{Context, ContextCompat};
-use super::common::centroid;
+use super::common::{centroid, Embedder};
 
 #[derive(Debug)]
 pub struct OllamaInference {
@@ -16,9 +16,13 @@ struct OllamaEmbedResponse {
     pub embeddings: Vec<Vec<f32>>,
 }
 
-impl OllamaInference {
+impl Embedder for OllamaInference {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
     #[tracing::instrument(skip(self, source))]
-    pub fn compute_inner(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
+    fn embed_array(&self, source: ArrayRef) -> eyre::Result<Float32Array> {
         if source.is_nullable() {
             eyre::bail!("Expected non-nullable data type")
         }

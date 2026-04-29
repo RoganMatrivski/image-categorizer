@@ -1,3 +1,47 @@
+use arrow_array::{ArrayRef, BinaryArray, Float32Array};
+use std::sync::Arc;
+
+pub trait ToEmbedInput {
+    fn to_embed_input(self) -> ArrayRef;
+}
+
+impl ToEmbedInput for ArrayRef {
+    fn to_embed_input(self) -> ArrayRef {
+        self
+    }
+}
+
+impl ToEmbedInput for BinaryArray {
+    fn to_embed_input(self) -> ArrayRef {
+        Arc::new(self)
+    }
+}
+
+impl ToEmbedInput for Vec<Vec<u8>> {
+    fn to_embed_input(self) -> ArrayRef {
+        Arc::new(BinaryArray::from_iter_values(self))
+    }
+}
+
+impl ToEmbedInput for Vec<&[u8]> {
+    fn to_embed_input(self) -> ArrayRef {
+        Arc::new(BinaryArray::from(self))
+    }
+}
+
+pub trait Embedder {
+    fn embed_array(&self, source: ArrayRef) -> eyre::Result<Float32Array>;
+    fn dim(&self) -> usize;
+}
+
+pub trait EmbedderExt: Embedder {
+    fn embed<I: ToEmbedInput>(&self, input: I) -> eyre::Result<Float32Array> {
+        self.embed_array(input.to_embed_input())
+    }
+}
+
+impl<T: Embedder + ?Sized> EmbedderExt for T {}
+
 pub fn centroid(vectors: Vec<Vec<f32>>) -> eyre::Result<Vec<f32>> {
     if vectors.is_empty() {
         eyre::bail!("Cannot compute centroid of empty vector list");

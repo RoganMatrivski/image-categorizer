@@ -12,7 +12,7 @@ mod db;
 mod embeddings;
 mod init;
 
-use crate::embeddings::LlamaCppInference;
+use crate::embeddings::{Embedder, EmbedderExt, LlamaCppInference};
 
 #[cfg(target_env = "musl")]
 #[global_allocator]
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Report> {
         client: reqwest::Client::new(),
         dim: 2048,
     };
-    let dim = embedder.dim;
+    let dim = embedder.dim();
 
     tracing::debug!(
         n_images = args.images.len(),
@@ -142,12 +142,12 @@ async fn main() -> Result<(), Report> {
                 img_data.push((name.clone(), bytes));
             }
 
-            use arrow_array::{ArrayRef, BinaryArray};
-            let arr: ArrayRef = std::sync::Arc::new(BinaryArray::from(
-                img_data.iter().map(|(_, b)| b.as_slice()).collect::<Vec<_>>(),
-            ));
-
-            let embeddings = embedder.compute_inner(arr)?;
+            let embeddings = embedder.embed(
+                img_data
+                    .iter()
+                    .map(|(_, b)| b.as_slice())
+                    .collect::<Vec<_>>(),
+            )?;
             
             for (i, (_, name)) in chunk.iter().enumerate() {
                 let start = i * dim;
