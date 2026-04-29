@@ -60,7 +60,7 @@ async fn get_embedder(args: &init::Args) -> eyre::Result<Box<dyn Embedder + Send
             Ok(Box::new(LlamaCppInference {
                 base_url,
                 client: reqwest::Client::new(),
-                dim: 2048, // TODO: Make configurable if needed
+                dim: args.dims.wrap_err("Dim args not defined")?, // TODO: Make configurable if needed
             }) as Box<dyn Embedder + Send + Sync>)
         }
         init::EmbedMode::Ollama => {
@@ -73,7 +73,7 @@ async fn get_embedder(args: &init::Args) -> eyre::Result<Box<dyn Embedder + Send
                 base_url,
                 client: reqwest::Client::new(),
                 model: args.model.clone(),
-                dim: 768, // TODO: Make configurable if needed
+                dim: args.dims.wrap_err("Dim args not defined")?, // TODO: Make configurable if needed
             }) as Box<dyn Embedder + Send + Sync>)
         }
     }

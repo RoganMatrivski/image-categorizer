@@ -36,6 +36,15 @@ pub struct Args {
     )]
     pub base_url: Option<url::Url>,
 
+    /// Dimensions for inference server
+    #[arg(
+        short,
+        long,
+        required_if_eq("embed_mode", "llama-cpp"),
+        required_if_eq("embed_mode", "ollama")
+    )]
+    pub dims: Option<usize>,
+
     #[arg(long)]
     pub no_local_db: bool,
 
