@@ -16,14 +16,16 @@ pub async fn init_table(
     db.pull().await?;
 
     conn.execute(
-        r#"
-            CREATE TABLE IF NOT EXISTS ?1 (
+        format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY,
                 filename TEXT UNIQUE,
-                embedding F32_BLOB()
+                embedding F32_BLOB({dims})
             );
-        "#,
-        turso::params![table_name, dims],
+        "#
+        ),
+        turso::params![],
     )
     .await?;
 
