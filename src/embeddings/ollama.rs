@@ -1,7 +1,7 @@
+use super::common::{centroid, Embedder};
 use arrow_array::{builder::Float32Builder, cast::AsArray, ArrayRef, Float32Array};
 use arrow_schema::DataType;
 use eyre::{Context, ContextCompat};
-use super::common::{centroid, Embedder};
 
 #[derive(Debug)]
 pub struct OllamaInference {
