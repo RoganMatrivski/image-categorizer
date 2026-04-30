@@ -38,17 +38,82 @@ fn get_filename(p: impl AsRef<std::path::Path> + std::fmt::Debug) -> eyre::Resul
 
 static MPB: LazyLock<MultiProgress> = LazyLock::new(|| MultiProgress::new());
 
+async fn download_hf_repo(
+    model: impl ToString,
+    cachedir: Option<std::path::PathBuf>,
+) -> eyre::Result<std::path::PathBuf> {
+    let model = model.to_string();
+
+    let cache = match cachedir {
+        Some(p) => hf_hub::Cache::new(p.into()),
+        None => hf_hub::Cache::from_env(), // reads HF_HOME, falls back to ~/.cache/huggingface/hub
+    };
+
+    let normalized_model_path = std::path::Path::new(&model)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("--");
+
+    let target_dir = cache.path().join(normalized_model_path);
+
+    tracing::debug!(?target_dir, "downloading file");
+
+    let cacherepo = cache.model(model.clone());
+    let hf_api = hf_hub::api::tokio::ApiBuilder::from_cache(cache)
+        .high()
+        .build()?;
+    let repo = hf_api.model(model);
+    let repo_info = repo.info().await?;
+    let files = repo_info.siblings.into_iter().map(|x| x.rfilename);
+
+    #[derive(Clone)]
+    struct HfProgressBar(indicatif::ProgressBar);
+    impl hf_hub::api::tokio::Progress for HfProgressBar {
+        async fn init(&mut self, size: usize, filename: &str) {
+            self.0 = MPB.add(
+                ProgressBar::new(size as u64)
+                    .with_style(
+                        ProgressStyle::with_template(
+                            "{spinner:.cyan} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta}) {msg}",
+                        )
+                        .expect("ProgressBar style template error")
+                        .progress_chars("█▉▊▋▌▍▎▏ "),
+                    )
+                    .with_message(filename.to_string()),
+            );
+        }
+        async fn update(&mut self, size: usize) {
+            self.0.inc(size as u64);
+        }
+        async fn finish(&mut self) {
+            self.0.finish_and_clear();
+        }
+    }
+
+    for f in files {
+        if cacherepo.get(&f).is_none() {
+            repo.download_with_progress(&f, HfProgressBar(ProgressBar::new(0)))
+                .await?;
+        }
+    }
+
+    Ok(cacherepo.pointer_path(&repo_info.sha))
+}
+
 async fn get_embedder(args: &init::Args) -> eyre::Result<Box<dyn Embedder + Send + Sync>> {
     match args.embed_mode {
         init::EmbedMode::OpenClip => {
             tracing::info!(model = args.model, "Loading OpenClip vision embedder");
-            let vis = VisionEmbedder::from_hf(&args.model)
+
+            let model_dir = download_hf_repo(args.model.clone(), None).await?; // TODO: Make this as args
+
+            let vis = VisionEmbedder::from_local_dir(&model_dir)
                 .with_execution_providers(&[
                     ort::ep::WebGPU::default().build(),
                     ort::ep::DirectML::default().build(),
                 ])
-                .build()
-                .await?;
+                .build()?;
             Ok(Box::new(OpenClipInference { vis }) as Box<dyn Embedder + Send + Sync>)
         }
         init::EmbedMode::LlamaCpp => {

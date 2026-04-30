@@ -20,6 +20,7 @@ colored = "3.1.1"
 dotenvy = "0.15.7"
 eyre = "0.6.12"
 futures = "0.3.32"
+hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
 image = "0.25.10"
 indicatif = "0.18.4"
 ndarray = "0.17.2"
@@ -28,6 +29,7 @@ ort = { version = "2.0.0-rc.12", features = ["directml", "webgpu"] }
 petal-clustering = "0.13.0"
 petal-decomposition = {version="0.9.0", features = ["intel-mkl-static"]}
 petal-neighbors = "0.18.0"
+rand = { version = "0.10.1", features = ["thread_rng"] }
 reqwest = { version = "0.12", features = ["json"] }
 scirs2-metrics = { version = "0.4.2", default-features = false, features = ["optim_integration"] }
 serde = { version = "1.0.228", features = ["derive"] }
