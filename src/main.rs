@@ -162,6 +162,9 @@ async fn main() -> Result<(), Report> {
     let args = init::initialize()?;
     let table_name = get_table_name(args.embed_mode, &args.model);
 
+    let embedder = get_embedder(&args).await?;
+    let dim = embedder.dim();
+
     let cancel_token = CancellationToken::new();
     let cloned_token = cancel_token.clone();
     tokio::spawn(async move {
@@ -189,9 +192,6 @@ async fn main() -> Result<(), Report> {
 
         cloned_token.cancel();
     });
-
-    let embedder = get_embedder(&args).await?;
-    let dim = embedder.dim();
 
     tracing::debug!("Connecting to Turso database");
     let (db, conn) = db::init_table(&args.get_db_str(), dim as u32, &table_name).await?;
@@ -325,6 +325,10 @@ async fn main() -> Result<(), Report> {
     let spin_pb = MPB.add(ProgressBar::new_spinner());
     spin_pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} ({elapsed})").unwrap());
     spin_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let pca_dim = clustering::optimize_pca_dim(&data);
+
+    todo!();
 
     let embedding = if args.pca_dim > 0 {
         spin_pb.set_message("Dimensionality reduction (PCA)");
