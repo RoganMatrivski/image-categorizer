@@ -37,7 +37,7 @@ fn get_filename(p: impl AsRef<std::path::Path> + std::fmt::Debug) -> eyre::Resul
         .to_string())
 }
 
-static MPB: LazyLock<MultiProgress> = LazyLock::new(|| MultiProgress::new());
+pub(crate) static MPB: LazyLock<MultiProgress> = LazyLock::new(|| MultiProgress::new());
 
 async fn download_hf_repo(
     model: impl ToString,

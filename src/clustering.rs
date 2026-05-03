@@ -1,10 +1,13 @@
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array2, Axis};
 use petal_clustering::{Fit, HDbscan};
 use rand::RngExt;
 use std::collections::HashMap;
 use tracing::{debug, info, instrument, warn};
 use turso::Connection;
+
+use crate::MPB;
 
 #[instrument(skip(conn))]
 pub async fn load_vectors(
@@ -428,6 +431,7 @@ pub fn optimize_pca_dim(embeddings: &ndarray::Array2<f32>) -> usize {
             ratio = ratio,
             "PCA optimization round start"
         );
+
         let x_sub = lhs_subsample(embeddings, ratio);
         info!(
             n_samples = x_sub.nrows(),
@@ -485,9 +489,26 @@ use crate::ndarray_compat::*;
 use egobox_ego::{EgorBuilder, InfillStrategy, XType};
 use ndarray as nd17;
 use ndarray016 as nd16;
+use std::sync::Mutex;
 
 pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
     let embeddings = embeddings.clone();
+
+    let pb = MPB.add(ProgressBar::new(50)); // ~10 initial + 40 iters
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+    pb.set_message("Bayesian Optimization");
+
+    let status_pb = MPB.add(ProgressBar::new_spinner());
+    status_pb.set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap());
+    status_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let best_score = Mutex::new(f64::NEG_INFINITY);
 
     // -----------------------------------------------------------------------
     // the scoring closure — egobox calls this repeatedly
@@ -501,6 +522,7 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
     //   - output: nd17 (our result)  → nd16 (back to egobox)
     // -----------------------------------------------------------------------
     let scoring_fn = |x: &nd16::ArrayView2<f64>| -> nd16::Array2<f64> {
+        pb.inc(1);
         // --- convert egobox's nd16 param matrix → nd17 so we can read it ---
         // egobox works in f64, our embeddings are f32, cast accordingly
         // x is shape (1, 3) — one row, three params
@@ -513,6 +535,11 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
         let min_samples = x_nd17[[0, 1]].round() as usize;
         let min_cluster_size = x_nd17[[0, 2]].round() as usize;
 
+        status_pb.set_message(format!(
+            "Eval: dim={}, ms={}, mc={}",
+            pca_dim, min_samples, min_cluster_size
+        ));
+
         // --- guard: PCA needs more rows than components ---
         // if pca_dim >= n_rows the decomposition will panic
         // return NEG_INFINITY to tell egobox: this region is invalid, stay away
@@ -523,6 +550,10 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
             // no conversion needed here — petal_decomposition is nd17
             // result shape: (n_rows, pca_dim)
             // this is the expensive step — O(n_rows * pca_dim^2)
+            status_pb.set_message(format!(
+                "PCA reduction (dim={}) ...",
+                pca_dim
+            ));
             let x_pca = petal_decomposition::PcaBuilder::new(pca_dim)
                 .build()
                 .fit_transform(&embeddings)
@@ -532,6 +563,10 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
             // no conversion needed — petal_clustering is nd17
             // clusters: HashMap<cluster_id, Vec<row_indices>>
             // outliers: Vec<row_indices> of noise points (label -1 equivalent)
+            status_pb.set_message(format!(
+                "Clustering (ms={}, mc={}) ...",
+                min_samples, min_cluster_size
+            ));
             let (clusters, outliers, _) = HDbscan {
                 min_samples,      // min points to form a dense region
                 min_cluster_size, // min points for a region to be a cluster
@@ -555,6 +590,14 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
                     .unwrap_or(f32::NEG_INFINITY) as f64
             }
         };
+
+        {
+            let mut best = best_score.lock().unwrap();
+            if score > *best {
+                *best = score;
+                pb.set_message(format!("Bayesian Optimization (Best: {:.4})", score));
+            }
+        }
 
         // --- negate: egobox MINIMIZES, we want to MAXIMIZE ---
         // egobox will push the output as low as possible
@@ -600,6 +643,8 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
         .expect("optimizer configured")
         .run()
         .expect("optimization failed");
+
+    pb.finish_and_clear();
 
     // --- extract best params found ---
     // x_opt is the param vector that produced the lowest output (= highest score)
