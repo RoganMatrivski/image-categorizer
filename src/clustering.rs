@@ -480,3 +480,134 @@ pub fn optimize_pca_dim(embeddings: &ndarray::Array2<f32>) -> usize {
     info!(winner = candidates[0], "PCA optimization complete");
     candidates[0]
 }
+
+use crate::ndarray_compat::*;
+use egobox_ego::{EgorBuilder, InfillStrategy, XType};
+use ndarray as nd17;
+use ndarray016 as nd16;
+
+pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
+    let embeddings = embeddings.clone();
+
+    // -----------------------------------------------------------------------
+    // the scoring closure — egobox calls this repeatedly
+    // each call = one "experiment" with a different set of params
+    //
+    // VERSION BOUNDARY NOTE:
+    // egobox was compiled against ndarray 0.16, so it hands us nd16 types
+    // petal_* crates are ndarray 0.17, so everything inside uses nd17
+    // we only need to convert at the two edges of this closure:
+    //   - input:  nd16 (from egobox) → nd17 (for our code)
+    //   - output: nd17 (our result)  → nd16 (back to egobox)
+    // -----------------------------------------------------------------------
+    let scoring_fn = |x: &nd16::ArrayView2<f64>| -> nd16::Array2<f64> {
+        // --- convert egobox's nd16 param matrix → nd17 so we can read it ---
+        // egobox works in f64, our embeddings are f32, cast accordingly
+        // x is shape (1, 3) — one row, three params
+        let x_nd17 = convert_16_17(x.mapv(|v| v as f32));
+
+        // --- extract params, rounding continuous egobox values to integers ---
+        // egobox works in continuous f64 space internally
+        // our params are integers so we round here
+        let pca_dim = x_nd17[[0, 0]].round() as usize;
+        let min_samples = x_nd17[[0, 1]].round() as usize;
+        let min_cluster_size = x_nd17[[0, 2]].round() as usize;
+
+        // --- guard: PCA needs more rows than components ---
+        // if pca_dim >= n_rows the decomposition will panic
+        // return NEG_INFINITY to tell egobox: this region is invalid, stay away
+        let score = if embeddings.nrows() <= pca_dim || pca_dim < 2 {
+            f64::NEG_INFINITY
+        } else {
+            // --- PCA: compress embeddings from high-dim to pca_dim ---
+            // no conversion needed here — petal_decomposition is nd17
+            // result shape: (n_rows, pca_dim)
+            // this is the expensive step — O(n_rows * pca_dim^2)
+            let x_pca = petal_decomposition::PcaBuilder::new(pca_dim)
+                .build()
+                .fit_transform(&embeddings)
+                .unwrap();
+
+            // --- HDBSCAN: cluster the PCA-reduced embeddings ---
+            // no conversion needed — petal_clustering is nd17
+            // clusters: HashMap<cluster_id, Vec<row_indices>>
+            // outliers: Vec<row_indices> of noise points (label -1 equivalent)
+            let (clusters, outliers, _) = HDbscan {
+                min_samples,      // min points to form a dense region
+                min_cluster_size, // min points for a region to be a cluster
+                ..HDbscan::default()
+            }
+            .fit(&x_pca, None);
+
+            let noise_ratio = outliers.len() as f32 / x_pca.nrows() as f32;
+
+            // --- reject degenerate clustering results ---
+            // < 2 clusters means everything collapsed into one blob (useless)
+            // > 50% noise means params are too strict, most data thrown away
+            // both cases return NEG_INFINITY so egobox avoids these regions
+            if clusters.len() < 2 || noise_ratio > 0.5 {
+                f64::NEG_INFINITY
+            } else {
+                // --- your composite score ---
+                // higher = better clustering quality
+                // wraps DBCV + silhouette + davies-bouldin internally
+                cluster_score(&x_pca, &clusters, &outliers, noise_ratio)
+                    .unwrap_or(f32::NEG_INFINITY) as f64
+            }
+        };
+
+        // --- negate: egobox MINIMIZES, we want to MAXIMIZE ---
+        // egobox will push the output as low as possible
+        // so returning -score means it's actually maximizing score
+        // then convert back to nd16 for egobox to consume
+        let score_nd17 = nd17::array![[-score]].into_shape((1, 1)).unwrap();
+        convert_17_16(score_nd17.mapv(|v| v as f32)).mapv(|v| v as f64)
+    };
+
+    // -----------------------------------------------------------------------
+    // define the search space — one row per param, columns are [min, max]
+    // egobox treats all params as continuous f64 internally
+    // we round to integers inside the closure above
+    // xlimits must be nd16 because egobox expects nd16
+    // -----------------------------------------------------------------------
+    // --- XType::Int tells egobox these are integers, no manual rounding needed ---
+    let xtypes = vec![
+        XType::Int(200, 768), // pca_dim
+        XType::Int(3, 50),    // min_samples
+        XType::Int(3, 50),    // min_cluster_size
+    ];
+
+    // -----------------------------------------------------------------------
+    // run Bayesian optimization
+    //
+    // how it works internally:
+    //   1. evaluate ~10 random param sets to bootstrap
+    //   2. fit a Gaussian Process surrogate on those results
+    //      (the GP is a "map" of what the score landscape looks like)
+    //   3. use Expected Improvement to pick the next most promising point
+    //      (balances exploit: near current best, vs explore: uncertain regions)
+    //   4. evaluate that point, update the GP, repeat
+    //   5. after max_iters, return the best params seen
+    //
+    // result: near-optimal params in ~40 evals instead of brute-force hundreds
+    //
+    // version note: Egor, xlimits, and x_opt are all nd16 types
+    // that's fine — we only touch them at the boundary, not inside
+    // -----------------------------------------------------------------------
+    let result = EgorBuilder::optimize(scoring_fn)
+        .configure(|config| config.max_iters(40).infill_strategy(InfillStrategy::EI))
+        .min_within_mixint_space(&xtypes)
+        .expect("optimizer configured")
+        .run()
+        .expect("optimization failed");
+
+    // --- extract best params found ---
+    // x_opt is the param vector that produced the lowest output (= highest score)
+    // it's nd16 but we just index into it, no conversion needed
+    let best = result.x_opt;
+    (
+        best[0].round() as usize, // pca_dim
+        best[1].round() as usize, // min_samples
+        best[2].round() as usize, // min_cluster_size
+    )
+}

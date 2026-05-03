@@ -327,7 +327,7 @@ async fn main() -> Result<(), Report> {
     spin_pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} ({elapsed})").unwrap());
     spin_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let pca_dim = clustering::optimize_pca_dim(&data);
+    let (pca_dim, min_samples, min_cluster_size) = clustering::optimize_all(&data);
 
     todo!();
 
