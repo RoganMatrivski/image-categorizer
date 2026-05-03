@@ -1,18 +1,19 @@
 use colored::Colorize;
-use ndarray::{stack, Array2, Axis};
+use ndarray::{Array2, Axis};
 use petal_clustering::{Fit, HDbscan};
 use rand::RngExt;
 use std::collections::HashMap;
+use tracing::{debug, info, instrument, warn};
 use turso::Connection;
-use tracing::{info, instrument, warn};
 
+#[instrument(skip(conn))]
 pub async fn load_vectors(
     conn: &Connection,
     table_name: &str,
     dim: usize,
 ) -> eyre::Result<(Vec<String>, Array2<f32>)> {
-// ... (rest of file)
-
+    info!(table_name, dim, "Loading vectors from database");
+    let mut rows = conn
         .query(
             &format!("SELECT filename, embedding FROM {}", table_name),
             turso::params![],
@@ -47,6 +48,7 @@ pub async fn load_vectors(
     }
 
     let data = Array2::from_shape_vec((n_rows, dim), flat)?;
+    debug!(n_rows, "Loaded vectors successfully");
     Ok((filenames, data))
 }
 
@@ -132,6 +134,10 @@ pub fn cluster_score(
         .map(|i| (embeddings.row(i).to_owned(), labels[i]))
         .unzip(); // split the (row, label) pairs into two separate Vecs
 
+    if clean_rows.is_empty() {
+        return Ok(-1.0);
+    }
+
     // Stack the kept rows back into a 2D matrix that silhouette_score expects.
     let clean_x = ndarray::stack(
         ndarray::Axis(0),
@@ -182,8 +188,10 @@ pub fn cluster_score(
     // Ok(score)
 }
 
+#[instrument(skip(x))]
 pub fn lhs_subsample(x: &Array2<f32>, ratio: f32) -> Array2<f32> {
     use rand::seq::SliceRandom;
+    debug!(ratio, "Subsampling with LHS");
 
     let mut rng = rand::rng();
     let n_rows = x.nrows();
@@ -258,7 +266,12 @@ pub fn lhs_subsample(x: &Array2<f32>, ratio: f32) -> Array2<f32> {
     x_sampled
 }
 
+#[instrument(skip(embeddings))]
 pub fn cluster(embeddings: &ndarray::Array2<f32>) -> eyre::Result<()> {
+    info!(
+        "Starting clustering process with {} samples",
+        embeddings.nrows()
+    );
     Ok(())
 }
 
@@ -275,7 +288,9 @@ fn reservoir_sample(n_rows: usize, k: usize) -> Vec<usize> {
     reservoir
 }
 
+#[instrument(skip(x_sampled))]
 fn optimize_hdbscan(x_sampled: &Array2<f32>) -> HDbscan<f32, petal_neighbors::distance::Euclidean> {
+    info!("Starting HDBSCAN parameter optimization");
     // Step 1: define candidate grid
     let min_samples_opts = [3, 5, 10, 20, 50];
     let min_cluster_opts = [3, 5, 10, 20, 50];
@@ -283,7 +298,12 @@ fn optimize_hdbscan(x_sampled: &Array2<f32>) -> HDbscan<f32, petal_neighbors::di
     let mut candidates: Vec<(usize, usize)> = min_samples_opts
         .iter()
         .flat_map(|&ms| min_cluster_opts.iter().map(move |&mc| (ms, mc)))
-        .collect(); // 25 combos
+        .collect();
+
+    info!(
+        n_candidates = candidates.len(),
+        "Initial candidate grid generated"
+    );
 
     // Step 2: successive halving — score on increasing data fractions
     // each round: keep top half, double the data
@@ -293,12 +313,11 @@ fn optimize_hdbscan(x_sampled: &Array2<f32>) -> HDbscan<f32, petal_neighbors::di
         (1.00, candidates.len() / 4),
     ];
 
-    for (ratio, keep) in rounds {
+    for (round_idx, (ratio, keep)) in rounds.iter().enumerate() {
+        info!(round = round_idx, ratio = ratio, "Optimization round start");
         // subsample x_sampled further for cheap early rounds
-        let sub_indices = reservoir_sample(
-            x_sampled.nrows(),
-            ((x_sampled.nrows() as f64) * ratio) as usize,
-        );
+        let n_sub = ((x_sampled.nrows() as f64) * ratio) as usize;
+        let sub_indices = reservoir_sample(x_sampled.nrows(), n_sub);
         let x_round = ndarray::stack(
             Axis(0),
             &sub_indices
@@ -308,26 +327,52 @@ fn optimize_hdbscan(x_sampled: &Array2<f32>) -> HDbscan<f32, petal_neighbors::di
         )
         .unwrap();
 
+        info!(
+            n_samples = x_round.nrows(),
+            "Subsampled data for this round"
+        );
+
         let mut scored: Vec<((usize, usize), f32)> = candidates
             .iter()
             .map(|&(ms, mc)| {
                 let score = score_hdbscan(&x_round, ms, mc);
+                debug!(
+                    min_samples = ms,
+                    min_cluster_size = mc,
+                    score,
+                    "Evaluated candidate"
+                );
                 ((ms, mc), score)
             })
             .collect();
 
         // keep top half by score
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        candidates = scored[..keep].iter().map(|s| s.0).collect();
+
+        info!(round = round_idx, "Round results (top 5):");
+        for (i, ((ms, mc), score)) in scored.iter().take(5).enumerate() {
+            info!(
+                "  {}. params(ms={}, mc={}) -> score={:.4}",
+                i + 1,
+                ms,
+                mc,
+                score
+            );
+        }
+
+        candidates = scored[..*keep].iter().map(|s| s.0).collect();
+        info!(round = round_idx, n_survivors = candidates.len(), best_so_far = ?candidates[0], "Round complete");
     }
 
+    info!(winner = ?candidates[0], "HDBSCAN optimization complete");
     HDbscan {
         min_samples: candidates[0].0,
         min_cluster_size: candidates[0].1,
         ..Default::default()
-    } // winner
+    }
 }
 
+#[instrument(skip(x))]
 fn score_hdbscan(x: &Array2<f32>, min_samples: usize, min_cluster_size: usize) -> f32 {
     let mut hdbscan = HDbscan {
         min_samples,
@@ -339,38 +384,37 @@ fn score_hdbscan(x: &Array2<f32>, min_samples: usize, min_cluster_size: usize) -
 
     // need at least 2 clusters to score meaningfully
     if clusters.len() < 2 {
+        debug!(
+            n_clusters = clusters.len(),
+            "Insufficient clusters, penalizing"
+        );
         return f32::NEG_INFINITY;
-    }
-
-    let mut labels = vec![-1i32; x.nrows()];
-    for (id, members) in &clusters {
-        for &i in members {
-            labels[i] = *id as i32;
-        }
     }
 
     let noise_ratio = outliers.len() as f32 / x.nrows() as f32;
 
     // too much noise = bad params
     if noise_ratio > 0.5 {
+        debug!(noise_ratio, "Noise ratio too high (>0.5), penalizing");
         return f32::NEG_INFINITY;
     }
 
-    // let clean: Vec<usize> = (0..x.nrows()).filter(|&i| labels[i] != -1).collect();
-    // let x_clean = stack(
-    //     Axis(0),
-    //     &clean.iter().map(|&i| x.row(i)).collect::<Vec<_>>(),
-    // )
-    // .unwrap();
-    // let labels_clean: Vec<i32> = clean.iter().map(|&i| labels[i]).collect();
-
-    cluster_score(&x, &clusters, &outliers, noise_ratio).unwrap_or(f32::NEG_INFINITY)
+    let score = cluster_score(&x, &clusters, &outliers, noise_ratio).unwrap_or(f32::NEG_INFINITY);
+    score
 }
 
+#[instrument(skip(embeddings))]
 pub fn optimize_pca_dim(embeddings: &ndarray::Array2<f32>) -> usize {
+    info!("Starting PCA dimension optimization");
     // coarse candidates — log-spaced
-    let mut candidates: Vec<usize> = vec![2, 5, 10, 20, 50, 100, 200, 500];
+    let mut candidates: Vec<usize> = vec![200, 256, 320, 400, 512, 640, 768];
     candidates.retain(|&d| d < embeddings.ncols());
+
+    info!(
+        n_candidates = candidates.len(),
+        ?candidates,
+        "Initial dimension candidates"
+    );
 
     let rounds: &[(f32, usize)] = &[
         (0.2, candidates.len()),         // all candidates, 20% data
@@ -378,22 +422,30 @@ pub fn optimize_pca_dim(embeddings: &ndarray::Array2<f32>) -> usize {
         (1.0, candidates.len() / 4 + 1), // top quarter, full data
     ];
 
-    for &(ratio, keep) in rounds {
-        let indices = lhs_subsample(embeddings, ratio);
-        let rows: Vec<_> = indices
-            .iter()
-            .map(|&i| embeddings.row(i as usize))
-            .collect();
-        let x_sub = stack(Axis(0), &rows).unwrap();
+    for (round_idx, &(ratio, keep)) in rounds.iter().enumerate() {
+        info!(
+            round = round_idx,
+            ratio = ratio,
+            "PCA optimization round start"
+        );
+        let x_sub = lhs_subsample(embeddings, ratio);
+        info!(
+            n_samples = x_sub.nrows(),
+            "Generated LHS subsample for round"
+        );
 
         let mut scored: Vec<(usize, f32)> = candidates
             .iter()
             .map(|&dim| {
+                if x_sub.nrows() <= dim {
+                    return (dim, f32::NEG_INFINITY);
+                }
+
                 let x_pca = petal_decomposition::PcaBuilder::new(dim)
                     .build()
                     .fit_transform(&x_sub)
                     .unwrap();
-                // let x_pca = pca_reduce(&x_sub, dim); // your pca fn here
+
                 let (clusters, outliers, _) = HDbscan {
                     min_samples: 5,
                     min_cluster_size: 5,
@@ -403,13 +455,28 @@ pub fn optimize_pca_dim(embeddings: &ndarray::Array2<f32>) -> usize {
                 let noise_ratio = outliers.len() as f32 / x_pca.nrows() as f32;
                 let score = cluster_score(&x_pca, &clusters, &outliers, noise_ratio)
                     .unwrap_or(f32::NEG_INFINITY);
+
+                debug!(dim, score, "Evaluated dimension candidate");
                 (dim, score)
             })
             .collect();
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        info!(round = round_idx, "Round results:");
+        for (i, (dim, score)) in scored.iter().take(5).enumerate() {
+            info!("  {}. dim={} -> score={:.4}", i + 1, dim, score);
+        }
+
         candidates = scored[..keep].iter().map(|s| s.0).collect();
+        info!(
+            round = round_idx,
+            n_survivors = candidates.len(),
+            best_dim = candidates[0],
+            "Round complete"
+        );
     }
 
+    info!(winner = candidates[0], "PCA optimization complete");
     candidates[0]
 }
