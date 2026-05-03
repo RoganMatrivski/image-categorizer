@@ -24,6 +24,8 @@ futures = "0.3.32"
 hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
 image = "0.25.10"
 indicatif = "0.18.4"
+linfa = "0.8.1"
+linfa-reduction = "0.8.1"
 ndarray = "0.17.2"
 ndarray016 = { package = "ndarray", version = "0.16" }
 open_clip_inference = "0.4.0"

@@ -123,7 +123,7 @@ macro_rules! pkg_name {
     };
 }
 pub fn initialize() -> Result<Args, Report> {
-    dotenvy::dotenv()?;
+    dotenvy::dotenv().ok();
 
     use tracing_error::ErrorLayer;
     use tracing_subscriber::prelude::*;

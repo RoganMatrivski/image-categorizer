@@ -104,6 +104,7 @@ pub fn print_clusters(
     }
 }
 
+#[instrument(skip_all)]
 pub fn cluster_score(
     embeddings: &ndarray::Array2<f32>,
     clusters: &HashMap<usize, Vec<usize>>,
@@ -116,6 +117,12 @@ pub fn cluster_score(
     };
 
     let n_samples = embeddings.nrows();
+    debug!(
+        n_samples,
+        n_clusters = clusters.len(),
+        n_outliers = outliers.len(),
+        "Calculating cluster score"
+    );
 
     // Start with all labels as 0, then fill in the real cluster ids.
     // clusters is { cluster_id -> [sample_index, ...] }, so we flip it:
@@ -489,12 +496,78 @@ use crate::ndarray_compat::*;
 use egobox_ego::{EgorBuilder, InfillStrategy, XType};
 use ndarray as nd17;
 use ndarray016 as nd16;
+use petal_decomposition::PcaBuilder;
 use std::sync::Mutex;
+
+use linfa::traits::{Fit as LinfaFit, Predict};
+use linfa::DatasetBase;
+use linfa_reduction::Pca;
+
+// fn find_safe_pca_dim(embeddings: &nd17::Array2<f32>) -> usize {
+//     let n_rows = embeddings.nrows();
+//     let n_cols = embeddings.ncols();
+
+//     let mut lo = 2usize;
+//     let mut hi = n_cols - 1;
+//     let mut last_good = 2;
+
+//     while lo <= hi {
+//         let mid = (lo + hi) / 2;
+//         if mid >= n_rows {
+//             hi = mid - 1;
+//             continue;
+//         }
+
+//         // try PCA at this dim — if it panics we need to go lower
+//         let result = std::panic::catch_unwind(|| {
+//             petal_decomposition::PcaBuilder::new(mid)
+//                 .build()
+//                 .fit_transform(embeddings)
+//         });
+
+//         if result.is_ok() {
+//             last_good = mid;
+//             lo = mid + 1;
+//         } else {
+//             hi = mid - 1;
+//         }
+//     }
+
+//     last_good
+// }
+
+fn find_safe_pca_dim(embeddings: &nd17::Array2<f32>) -> usize {
+    let n_cols = embeddings.ncols();
+    let mut lo = 2usize;
+    let mut hi = n_cols.saturating_sub(1);
+    let mut last_good = 2;
+
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            petal_decomposition::PcaBuilder::new(mid)
+                .build()
+                .fit_transform(embeddings)
+                .unwrap()
+        }));
+
+        if result.is_ok() {
+            last_good = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    // add safety margin — stay 10% below the cliff
+    ((last_good as f64) * 0.9) as usize
+}
 
 pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
     let embeddings = embeddings.clone();
 
-    let pb = MPB.add(ProgressBar::new(50)); // ~10 initial + 40 iters
+    let pb = MPB.add(ProgressBar::new(50));
     pb.set_style(
         ProgressStyle::with_template(
             "{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
@@ -510,115 +583,159 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
 
     let best_score = Mutex::new(f64::NEG_INFINITY);
 
+    let n_rows = embeddings.nrows();
+    let n_cols = embeddings.ncols();
+
+    // --- safe upper bound for pca_dim ---
+    // linfa does proper truncated SVD so no overflow like petal-decomposition
+    // still cap below min(n_rows, n_cols) since you can't extract more components than that
+    let safe_max_pca_dim = (n_rows - 1).min(n_cols - 1);
+
+    // --- subsample: enough rows for PCA, capped at target for speed ---
+    let target_rows = 2000;
+    let actual_rows = target_rows.max(safe_max_pca_dim + 1).min(n_rows);
+    let ratio = actual_rows as f64 / n_rows as f64;
+
+    let indices = lhs_subsample(&embeddings, ratio as f32);
+    let rows: Vec<_> = indices
+        .iter()
+        .map(|&i| embeddings.row(i as usize))
+        .collect();
+    // x_sub is nd17 — used directly by HDBSCAN
+    // converted to nd16 inside closure for linfa PCA
+    let x_sub = nd17::stack(nd17::Axis(0), &rows).unwrap();
+
+    let sqrt_n = (x_sub.nrows() as f64).sqrt() as usize;
+    let max_ms = (sqrt_n / 2).max(5).min(50); // half of sqrt, at least 5, cap at 50
+
+    let xtypes = vec![
+        XType::Int(50, safe_max_pca_dim as i32),
+        XType::Int(2, max_ms as i32),
+        XType::Int(2, max_ms as i32),
+    ];
+
     // -----------------------------------------------------------------------
     // the scoring closure — egobox calls this repeatedly
     // each call = one "experiment" with a different set of params
     //
     // VERSION BOUNDARY NOTE:
     // egobox was compiled against ndarray 0.16, so it hands us nd16 types
-    // petal_* crates are ndarray 0.17, so everything inside uses nd17
-    // we only need to convert at the two edges of this closure:
-    //   - input:  nd16 (from egobox) → nd17 (for our code)
-    //   - output: nd17 (our result)  → nd16 (back to egobox)
+    // linfa also uses ndarray 0.16
+    // petal_clustering uses ndarray 0.17
+    // conversion map:
+    //   egobox (nd16) → nd17 to read params
+    //   x_sub (nd17) → nd16 for linfa PCA
+    //   linfa output (nd16) → nd17 for HDBSCAN
+    //   score (nd17 f64) → nd16 back to egobox
     // -----------------------------------------------------------------------
     let scoring_fn = |x: &nd16::ArrayView2<f64>| -> nd16::Array2<f64> {
-        pb.inc(1);
-        // --- convert egobox's nd16 param matrix → nd17 so we can read it ---
-        // egobox works in f64, our embeddings are f32, cast accordingly
-        // x is shape (1, 3) — one row, three params
-        let x_nd17 = convert_16_17(x.mapv(|v| v as f32));
+        // --- egobox can pass multiple rows at once during initial DoE bootstrap ---
+        // output must be (n_points, 1) — one score per input row
+        let n_points = x.nrows();
+        let mut scores = nd16::Array2::from_elem((n_points, 1), f64::NEG_INFINITY);
 
-        // --- extract params, rounding continuous egobox values to integers ---
-        // egobox works in continuous f64 space internally
-        // our params are integers so we round here
-        let pca_dim = x_nd17[[0, 0]].round() as usize;
-        let min_samples = x_nd17[[0, 1]].round() as usize;
-        let min_cluster_size = x_nd17[[0, 2]].round() as usize;
+        for i in 0..n_points {
+            pb.inc(1);
 
-        status_pb.set_message(format!(
-            "Eval: dim={}, ms={}, mc={}",
-            pca_dim, min_samples, min_cluster_size
-        ));
+            // --- slice row i, convert nd16 → nd17 to read params ---
+            let x_nd17 = convert_16_17(x.slice(nd16::s![i..i + 1, ..]).mapv(|v| v as f32));
 
-        // --- guard: PCA needs more rows than components ---
-        // if pca_dim >= n_rows the decomposition will panic
-        // return NEG_INFINITY to tell egobox: this region is invalid, stay away
-        let score = if embeddings.nrows() <= pca_dim || pca_dim < 2 {
-            f64::NEG_INFINITY
-        } else {
-            // --- PCA: compress embeddings from high-dim to pca_dim ---
-            // no conversion needed here — petal_decomposition is nd17
-            // result shape: (n_rows, pca_dim)
-            // this is the expensive step — O(n_rows * pca_dim^2)
+            // --- extract params ---
+            // XType::Int means egobox already constrains to integers
+            // we still round defensively
+            let pca_dim = x_nd17[[0, 0]].round() as usize;
+            let min_samples = x_nd17[[0, 1]].round() as usize;
+            let min_cluster_size = x_nd17[[0, 2]].round() as usize;
+
+            let span =
+                tracing::info_span!("optimization_eval", pca_dim, min_samples, min_cluster_size);
+            let _guard = span.enter();
+
             status_pb.set_message(format!(
-                "PCA reduction (dim={}) ...",
-                pca_dim
+                "Eval: dim={}, ms={}, mc={}",
+                pca_dim, min_samples, min_cluster_size
             ));
-            let x_pca = petal_decomposition::PcaBuilder::new(pca_dim)
-                .build()
-                .fit_transform(&embeddings)
-                .unwrap();
 
-            // --- HDBSCAN: cluster the PCA-reduced embeddings ---
-            // no conversion needed — petal_clustering is nd17
-            // clusters: HashMap<cluster_id, Vec<row_indices>>
-            // outliers: Vec<row_indices> of noise points (label -1 equivalent)
-            status_pb.set_message(format!(
-                "Clustering (ms={}, mc={}) ...",
-                min_samples, min_cluster_size
-            ));
-            let (clusters, outliers, _) = HDbscan {
-                min_samples,      // min points to form a dense region
-                min_cluster_size, // min points for a region to be a cluster
-                ..HDbscan::default()
-            }
-            .fit(&x_pca, None);
-
-            let noise_ratio = outliers.len() as f32 / x_pca.nrows() as f32;
-
-            // --- reject degenerate clustering results ---
-            // < 2 clusters means everything collapsed into one blob (useless)
-            // > 50% noise means params are too strict, most data thrown away
-            // both cases return NEG_INFINITY so egobox avoids these regions
-            if clusters.len() < 2 || noise_ratio > 0.5 {
+            // --- guard: PCA needs more rows than components ---
+            // if pca_dim >= n_rows the decomposition will fail
+            // return NEG_INFINITY to tell egobox: this region is invalid, stay away
+            let score = if x_sub.nrows() <= pca_dim || pca_dim < 2 {
+                warn!(
+                    pca_dim,
+                    n_rows = x_sub.nrows(),
+                    "PCA dimension invalid for data size"
+                );
                 f64::NEG_INFINITY
             } else {
-                // --- your composite score ---
-                // higher = better clustering quality
-                // wraps DBCV + silhouette + davies-bouldin internally
-                cluster_score(&x_pca, &clusters, &outliers, noise_ratio)
-                    .unwrap_or(f32::NEG_INFINITY) as f64
-            }
-        };
+                // --- convert nd17 → nd16 for linfa ---
+                let x_sub_16 = convert_17_16(x_sub.clone());
 
-        {
-            let mut best = best_score.lock().unwrap();
-            if score > *best {
-                *best = score;
-                pb.set_message(format!("Bayesian Optimization (Best: {:.4})", score));
+                // --- PCA: truncated SVD via linfa ---
+                // linfa handles large matrices without the i32 overflow
+                // that petal-decomposition has in its lwork calculation
+                // result shape: (n_rows, pca_dim)
+                status_pb.set_message(format!("PCA reduction (dim={}) ...", pca_dim));
+                let dataset = linfa::DatasetBase::from(x_sub_16.mapv(|v| v as f64));
+                let pca = linfa_reduction::Pca::params(pca_dim).fit(&dataset).unwrap();
+                let x_pca_16 = pca.predict(&dataset).mapv(|v| v as f32);
+
+                // --- convert nd16 → nd17 for HDBSCAN ---
+                let x_pca = convert_16_17(x_pca_16);
+
+                // --- HDBSCAN: cluster the PCA-reduced embeddings ---
+                // clusters: HashMap<cluster_id, Vec<row_indices>>
+                // outliers: Vec<row_indices> of noise points (label -1 equivalent)
+                status_pb.set_message(format!(
+                    "Clustering (ms={}, mc={}) ...",
+                    min_samples, min_cluster_size
+                ));
+                let (clusters, outliers, _) = HDbscan {
+                    min_samples,      // min points to form a dense region
+                    min_cluster_size, // min points for a region to be a cluster
+                    ..HDbscan::default()
+                }
+                .fit(&x_pca, None);
+
+                let noise_ratio = outliers.len() as f32 / x_pca.nrows() as f32;
+
+                // --- reject degenerate clustering results ---
+                // < 2 clusters means everything collapsed into one blob (useless)
+                // > 50% noise means params are too strict, most data thrown away
+                // both return NEG_INFINITY so egobox avoids these regions
+                if clusters.len() < 2 {
+                    debug!(n_clusters = clusters.len(), "Insufficient clusters found");
+                    f64::NEG_INFINITY
+                } else if noise_ratio > 0.5 {
+                    debug!(noise_ratio, "Noise ratio too high (> 0.5)");
+                    f64::NEG_INFINITY
+                } else {
+                    // --- composite score ---
+                    // higher = better clustering quality
+                    // wraps DBCV + silhouette + davies-bouldin internally
+                    cluster_score(&x_pca, &clusters, &outliers, noise_ratio).unwrap_or_else(|e| {
+                        warn!(error = %e, "Failed to calculate cluster score");
+                        f32::NEG_INFINITY
+                    }) as f64
+                }
+            };
+
+            {
+                let mut best = best_score.lock().unwrap();
+                if score > *best {
+                    *best = score;
+                    pb.set_message(format!("Bayesian Optimization (Best: {:.4})", score));
+                }
             }
+
+            debug!(score, "Evaluation complete");
+
+            // --- negate: egobox MINIMIZES, we want to MAXIMIZE ---
+            // write negated score into output matrix row i
+            scores[[i, 0]] = -score;
         }
 
-        // --- negate: egobox MINIMIZES, we want to MAXIMIZE ---
-        // egobox will push the output as low as possible
-        // so returning -score means it's actually maximizing score
-        // then convert back to nd16 for egobox to consume
-        let score_nd17 = nd17::array![[-score]].into_shape((1, 1)).unwrap();
-        convert_17_16(score_nd17.mapv(|v| v as f32)).mapv(|v| v as f64)
+        scores
     };
-
-    // -----------------------------------------------------------------------
-    // define the search space — one row per param, columns are [min, max]
-    // egobox treats all params as continuous f64 internally
-    // we round to integers inside the closure above
-    // xlimits must be nd16 because egobox expects nd16
-    // -----------------------------------------------------------------------
-    // --- XType::Int tells egobox these are integers, no manual rounding needed ---
-    let xtypes = vec![
-        XType::Int(200, 768), // pca_dim
-        XType::Int(3, 50),    // min_samples
-        XType::Int(3, 50),    // min_cluster_size
-    ];
 
     // -----------------------------------------------------------------------
     // run Bayesian optimization
@@ -634,7 +751,7 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
     //
     // result: near-optimal params in ~40 evals instead of brute-force hundreds
     //
-    // version note: Egor, xlimits, and x_opt are all nd16 types
+    // version note: EgorBuilder, xtypes, and x_opt are all nd16 types
     // that's fine — we only touch them at the boundary, not inside
     // -----------------------------------------------------------------------
     let result = EgorBuilder::optimize(scoring_fn)
@@ -645,10 +762,10 @@ pub fn optimize_all(embeddings: &nd17::Array2<f32>) -> (usize, usize, usize) {
         .expect("optimization failed");
 
     pb.finish_and_clear();
+    status_pb.finish_and_clear();
 
     // --- extract best params found ---
     // x_opt is the param vector that produced the lowest output (= highest score)
-    // it's nd16 but we just index into it, no conversion needed
     let best = result.x_opt;
     (
         best[0].round() as usize, // pca_dim
