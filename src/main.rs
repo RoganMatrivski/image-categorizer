@@ -11,6 +11,7 @@ mod clustering;
 mod db;
 mod embeddings;
 mod init;
+mod ndarray_compat;
 
 use crate::embeddings::{
     Embedder, EmbedderExt, LlamaCppInference, OllamaInference, OpenClipInference,

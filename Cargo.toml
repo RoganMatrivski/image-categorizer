@@ -24,6 +24,7 @@ hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "ru
 image = "0.25.10"
 indicatif = "0.18.4"
 ndarray = "0.17.2"
+ndarray016 = { package = "ndarray", version = "0.16" }
 open_clip_inference = "0.4.0"
 ort = { version = "2.0.0-rc.12", features = ["directml", "webgpu"] }
 petal-clustering = "0.13.0"

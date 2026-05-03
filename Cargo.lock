@@ -2073,7 +2073,8 @@ dependencies = [
  "image",
  "indicatif",
  "mimalloc",
- "ndarray",
+ "ndarray 0.16.1",
+ "ndarray 0.17.2",
  "open_clip_inference",
  "ort",
  "petal-clustering",
@@ -2276,7 +2277,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "efbf1e090e930989bf4729ff23f7f30bd37fc6f9420e330acde0b09f30db614a"
 dependencies = [
- "ndarray",
+ "ndarray 0.17.2",
  "num-complex",
  "num-traits",
  "thiserror 2.0.18",
@@ -2664,6 +2665,21 @@ dependencies = [
 
 [[package]]
 name = "ndarray"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
+name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
@@ -2686,7 +2702,7 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "180f724d496e84764e8ecf28fbe1da74ef231ec4ba15be65a9100be8445d73e3"
 dependencies = [
- "ndarray",
+ "ndarray 0.17.2",
  "rand 0.9.4",
  "rand_distr 0.5.1",
 ]
@@ -2917,7 +2933,7 @@ dependencies = [
  "fast_image_resize",
  "hf-hub",
  "image",
- "ndarray",
+ "ndarray 0.17.2",
  "num_cpus",
  "ort",
  "rayon",
@@ -2992,7 +3008,7 @@ version = "2.0.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
 dependencies = [
- "ndarray",
+ "ndarray 0.17.2",
  "ort-sys",
  "smallvec",
  "tracing",
@@ -3089,7 +3105,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c8e67a7465f5f3b14fc47c99dfe154a6de9c29a96a908ecff40dfdbe5bc3c6"
 dependencies = [
  "itertools 0.14.0",
- "ndarray",
+ "ndarray 0.17.2",
  "num-traits",
  "petal-neighbors",
  "rayon",
@@ -3107,7 +3123,7 @@ dependencies = [
  "itertools 0.14.0",
  "lair",
  "lapack",
- "ndarray",
+ "ndarray 0.17.2",
  "num-complex",
  "num-traits",
  "rand 0.9.4",
@@ -3122,7 +3138,7 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16fd9983c4b760302fe9cee8ad204ee6555ed967df8fab30974138a001026c91"
 dependencies = [
- "ndarray",
+ "ndarray 0.17.2",
  "num-traits",
  "ordered-float",
  "thiserror 2.0.18",
@@ -3947,7 +3963,7 @@ dependencies = [
  "crossbeam-utils",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
- "ndarray",
+ "ndarray 0.17.2",
  "ndarray-rand",
  "num-complex",
  "num-integer",
